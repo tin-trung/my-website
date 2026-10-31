@@ -1,0 +1,3 @@
+# Chặn người ngoài truy cập trực tiếp file JSON dữ liệu đơn hàng
+Order Deny,Allow
+Deny from all
