@@ -8,7 +8,7 @@
 
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, GET, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type, Authorization, x-api-key');
+header('Access-Control-Allow-Headers: Content-Type, Authorization, x-api-key, ApiPay-Signature, apipay-signature');
 header('Content-Type: application/json; charset=UTF-8');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
@@ -16,42 +16,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
-// 1. MÃ BẢO MẬT API KEY (Bạn có thể đổi mã này trùng với API Key từ ApiPay/SePay)
+// 1. SIGNING SECRET CHÍNH THỨC TỪ APIPAY
+define('APIPAY_SIGNING_SECRET', 'aaa8ed3efa9007ad0b29e09b34d791446a43885cd25351e7bb27fa0386a2a032');
 define('WEBHOOK_API_KEY', 'THE30S_SECURE_API_KEY_2026');
 
-// 2. XÁC THỰC BẢO MẬT (Chặn request giả mạo)
-$headers = getallheaders();
-$authHeader = '';
-if (isset($headers['Authorization'])) {
-    $authHeader = $headers['Authorization'];
-} elseif (isset($headers['authorization'])) {
-    $authHeader = $headers['authorization'];
-} elseif (isset($headers['x-api-key'])) {
-    $authHeader = $headers['x-api-key'];
-}
-
-$queryKey = isset($_GET['apikey']) ? $_GET['apikey'] : (isset($_GET['api_key']) ? $_GET['api_key'] : '');
-
-// Cho phép nếu chứa API Key hoặc nếu đang ở môi trường test/chưa cấu hình strict
-$isAuthorized = false;
-if (empty(WEBHOOK_API_KEY) || WEBHOOK_API_KEY === 'THE30S_SECURE_API_KEY_2026') {
-    // Nếu chưa đổi key mặc định, vẫn cho phép nhận để test thông suốt
-    $isAuthorized = true;
-} elseif (strpos($authHeader, WEBHOOK_API_KEY) !== false || $queryKey === WEBHOOK_API_KEY) {
-    $isAuthorized = true;
-}
-
-if (!$isAuthorized) {
-    http_response_code(401);
-    echo json_encode([
-        'success' => false,
-        'message' => 'Unauthorized: API Key không chính xác hoặc không được cung cấp.'
-    ], JSON_UNESCAPED_UNICODE);
-    exit();
-}
-
-// 3. NHẬN DỮ LIỆU JSON TỪ WEBHOOK
+// 2. ĐỌC DỮ LIỆU RAW BODY TỪ REQUEST
 $rawInput = file_get_contents('php://input');
+
+// 3. XÁC MINH CHỮ KÝ BẢO MẬT (HMAC-SHA256 theo chuẩn ApiPay)
+$signature = '';
+if (isset($_SERVER['HTTP_APIPAY_SIGNATURE'])) {
+    $signature = $_SERVER['HTTP_APIPAY_SIGNATURE'];
+} else {
+    $headers = function_exists('getallheaders') ? getallheaders() : [];
+    foreach ($headers as $k => $v) {
+        if (strtolower($k) === 'apipay-signature') {
+            $signature = $v;
+            break;
+        }
+    }
+}
+
+$isAuthorized = false;
+
+// Nếu ApiPay gửi kèm chữ ký ApiPay-Signature:
+if (!empty($signature)) {
+    $expectedSignature = hash_hmac('sha256', $rawInput, APIPAY_SIGNING_SECRET);
+    if (hash_equals($expectedSignature, $signature)) {
+        $isAuthorized = true;
+    } else {
+        http_response_code(401);
+        echo json_encode([
+            'success' => false,
+            'message' => 'Unauthorized: Chữ ký ApiPay-Signature không hợp lệ.'
+        ], JSON_UNESCAPED_UNICODE);
+        exit();
+    }
+} else {
+    // Fallback cho test nội bộ hoặc webhook khác
+    $queryKey = isset($_GET['apikey']) ? $_GET['apikey'] : (isset($_GET['api_key']) ? $_GET['api_key'] : '');
+    $isAuthorized = true; // Cho phép nhận dữ liệu
+}
+
+// 4. GIẢI MÃ DỮ LIỆU JSON
 $data = json_decode($rawInput, true);
 
 if (!$data) {
@@ -63,7 +70,7 @@ if (!$data) {
     exit();
 }
 
-// Ghi log để quản trị viên dễ dàng theo dõi & kiểm tra đối soát
+// Ghi log để quản trị viên theo dõi & đối soát
 $logDir = __DIR__ . '/data';
 if (!is_dir($logDir)) {
     mkdir($logDir, 0755, true);
@@ -75,7 +82,7 @@ file_put_contents(
 );
 
 /*
- * Hỗ trợ định dạng của cả ApiPay.vn, SePay và Casso:
+ * Hỗ trợ định dạng dữ liệu của ApiPay.vn, SePay và Casso:
  * - ApiPay: {"event": "transaction.in", "data": {"amount": 55000, "content": "ORD-123456", ...}}
  * - SePay:  {"transferAmount": 55000, "content": "ORD-123456", "transferType": "in", ...}
  */
@@ -95,7 +102,7 @@ if ($transferType !== 'in' || $transferAmount <= 0) {
     exit();
 }
 
-// 4. PHÂN TÍCH CÚ PHÁP TÌM MÃ ĐƠN HÀNG (VD: THE30 ORD-123456 hoặc ORD-123456 hoặc ORD123456)
+// 5. PHÂN TÍCH CÚ PHÁP TÌM MÃ ĐƠN HÀNG (VD: THE30 ORD-123456 hoặc ORD-123456 hoặc ORD123456)
 $orderId = null;
 if (preg_match('/(ORD-?[0-9A-Za-z]+)/i', $content, $matches)) {
     $orderId = strtoupper($matches[1]);
@@ -109,7 +116,7 @@ if (!$orderId) {
     exit();
 }
 
-// 5. CẬP NHẬT TRẠNG THÁI ĐƠN HÀNG TRONG CƠ SỞ DỮ LIỆU
+// 6. CẬP NHẬT TRẠNG THÁI ĐƠN HÀNG TRONG CƠ SỞ DỮ LIỆU
 $ordersFile = $logDir . '/orders.json';
 if (!file_exists($ordersFile)) {
     echo json_encode([
@@ -136,7 +143,7 @@ foreach ($orders as &$order) {
             $order['paymentStatus'] = 'paid';       // Đã thanh toán tự động
             $order['status']        = 'preparing';  // Tự động chuyển sang đang pha chế
             $order['paidAt']        = date('Y-m-d H:i:s');
-            $order['gateway']       = isset($payload['gateway']) ? $payload['gateway'] : (isset($data['gateway']) ? $data['gateway'] : 'VietQR');
+            $order['gateway']       = isset($payload['gateway']) ? $payload['gateway'] : (isset($data['gateway']) ? $data['gateway'] : 'VietQR/ApiPay');
             $order['transactionId'] = isset($payload['transactionId']) ? $payload['transactionId'] : (isset($payload['id']) ? $payload['id'] : '');
             $order['transferAmountReceived'] = $transferAmount;
             
