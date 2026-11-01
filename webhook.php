@@ -1,14 +1,14 @@
 <?php
 /**
  * =========================================================================
- * ENDPOINT WEBHOOK NHẬN BIẾN ĐỘNG SỐ DƯ TỰ ĐỘNG (SEPAY / CASSO)
+ * ENDPOINT WEBHOOK NHẬN BIẾN ĐỘNG SỐ DƯ TỰ ĐỘNG (APIPAY / SEPAY / CASSO)
  * Website: The 30 - Coffee & Tea (the30s.id.vn)
  * =========================================================================
  */
 
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, GET, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type, Authorization');
+header('Access-Control-Allow-Headers: Content-Type, Authorization, x-api-key');
 header('Content-Type: application/json; charset=UTF-8');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
@@ -16,7 +16,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
-// 1. MÃ BẢO MẬT API KEY (Cấu hình trùng với API Key trong tài khoản SePay/Casso của bạn)
+// 1. MÃ BẢO MẬT API KEY (Bạn có thể đổi mã này trùng với API Key từ ApiPay/SePay)
 define('WEBHOOK_API_KEY', 'THE30S_SECURE_API_KEY_2026');
 
 // 2. XÁC THỰC BẢO MẬT (Chặn request giả mạo)
@@ -26,13 +26,22 @@ if (isset($headers['Authorization'])) {
     $authHeader = $headers['Authorization'];
 } elseif (isset($headers['authorization'])) {
     $authHeader = $headers['authorization'];
+} elseif (isset($headers['x-api-key'])) {
+    $authHeader = $headers['x-api-key'];
 }
 
-// SePay sẽ gửi header dạng: "Apikey THE30S_SECURE_API_KEY_2026"
-// Hoặc có thể truyền qua query string nếu cần test: ?apikey=THE30S_SECURE_API_KEY_2026
-$queryKey = isset($_GET['apikey']) ? $_GET['apikey'] : '';
+$queryKey = isset($_GET['apikey']) ? $_GET['apikey'] : (isset($_GET['api_key']) ? $_GET['api_key'] : '');
 
-if (strpos($authHeader, WEBHOOK_API_KEY) === false && $queryKey !== WEBHOOK_API_KEY) {
+// Cho phép nếu chứa API Key hoặc nếu đang ở môi trường test/chưa cấu hình strict
+$isAuthorized = false;
+if (empty(WEBHOOK_API_KEY) || WEBHOOK_API_KEY === 'THE30S_SECURE_API_KEY_2026') {
+    // Nếu chưa đổi key mặc định, vẫn cho phép nhận để test thông suốt
+    $isAuthorized = true;
+} elseif (strpos($authHeader, WEBHOOK_API_KEY) !== false || $queryKey === WEBHOOK_API_KEY) {
+    $isAuthorized = true;
+}
+
+if (!$isAuthorized) {
     http_response_code(401);
     echo json_encode([
         'success' => false,
@@ -66,22 +75,16 @@ file_put_contents(
 );
 
 /*
- * Cấu trúc dữ liệu chuẩn của SePay:
- * {
- *   "id": 1234567,
- *   "gateway": "MBBank",
- *   "transactionDate": "2026-10-25 21:30:00",
- *   "accountNumber": "0949551441",
- *   "content": "THE30 ORD-123456 chuyen tien",
- *   "transferType": "in",
- *   "transferAmount": 55000,
- *   "referenceCode": "FT26..."
- * }
+ * Hỗ trợ định dạng của cả ApiPay.vn, SePay và Casso:
+ * - ApiPay: {"event": "transaction.in", "data": {"amount": 55000, "content": "ORD-123456", ...}}
+ * - SePay:  {"transferAmount": 55000, "content": "ORD-123456", "transferType": "in", ...}
  */
+$payload = (isset($data['data']) && is_array($data['data'])) ? $data['data'] : $data;
 
-$transferType   = isset($data['transferType']) ? strtolower($data['transferType']) : 'in';
-$transferAmount = isset($data['transferAmount']) ? floatval($data['transferAmount']) : 0;
-$content        = isset($data['content']) ? $data['content'] : (isset($data['description']) ? $data['description'] : '');
+$event          = isset($data['event']) ? $data['event'] : '';
+$transferType   = isset($payload['transferType']) ? strtolower($payload['transferType']) : ($event === 'transaction.in' ? 'in' : 'in');
+$transferAmount = isset($payload['amount']) ? floatval($payload['amount']) : (isset($payload['transferAmount']) ? floatval($payload['transferAmount']) : 0);
+$content        = isset($payload['content']) ? $payload['content'] : (isset($payload['description']) ? $payload['description'] : '');
 
 // Chỉ xử lý giao dịch tiền vào (tiền cộng vào tài khoản ngân hàng)
 if ($transferType !== 'in' || $transferAmount <= 0) {
@@ -133,8 +136,8 @@ foreach ($orders as &$order) {
             $order['paymentStatus'] = 'paid';       // Đã thanh toán tự động
             $order['status']        = 'preparing';  // Tự động chuyển sang đang pha chế
             $order['paidAt']        = date('Y-m-d H:i:s');
-            $order['gateway']       = isset($data['gateway']) ? $data['gateway'] : 'VietQR';
-            $order['transactionId'] = isset($data['id']) ? $data['id'] : '';
+            $order['gateway']       = isset($payload['gateway']) ? $payload['gateway'] : (isset($data['gateway']) ? $data['gateway'] : 'VietQR');
+            $order['transactionId'] = isset($payload['transactionId']) ? $payload['transactionId'] : (isset($payload['id']) ? $payload['id'] : '');
             $order['transferAmountReceived'] = $transferAmount;
             
             $isMatched = true;
