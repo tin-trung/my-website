@@ -108,7 +108,7 @@ const DEFAULT_BANNERS = [
   }
 ];
 
-const SETTINGS_SCHEMA_VERSION = '20261101_v5';
+const SETTINGS_SCHEMA_VERSION = '20261101_v9';
 
 const DEFAULT_SETTINGS = {
   storeName: 'The 30 - Coffee & Tea',
@@ -391,8 +391,17 @@ async function syncOrdersFromApiPay() {
   } catch (e) {}
 }
 
-// Hàm ép buộc nâng cấp tài khoản VietinBank chính thức nếu trình duyệt/server còn lưu số cũ
+// Hàm ép buộc nâng cấp tài khoản VietinBank chính thức & đồng bộ dữ liệu trên mọi trình duyệt (Chrome, Safari, Edge...)
 function enforceOfficialBankSettings() {
+  const savedSchemaVer = localStorage.getItem('the30_schema_version');
+  if (savedSchemaVer !== SETTINGS_SCHEMA_VERSION) {
+    localStorage.setItem('the30_schema_version', SETTINGS_SCHEMA_VERSION);
+    state.products = [...DEFAULT_PRODUCTS];
+    state.banners = [...DEFAULT_BANNERS];
+    localStorage.setItem('the30_products', JSON.stringify(state.products));
+    localStorage.setItem('the30_banners', JSON.stringify(state.banners));
+  }
+
   if (
     !state.settings ||
     state.settings.settingsVersion !== SETTINGS_SCHEMA_VERSION ||
