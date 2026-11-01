@@ -477,14 +477,18 @@ async function createApiPayPaymentDirect(orderData) {
   if (result && result.data && result.data.publicId) {
     const d = result.data;
     orderData.apipayPublicId = d.publicId;
-    orderData.apipayQrUrl = d.qrUrl || `${APIPAY_LIVE_CONFIG.baseUrl}/payment-requests/${d.publicId}/qr-image`;
+    orderData.apipayQrUrl = '';
     orderData.apipayPayUrl = d.payUrl || `https://pay.apipay.vn/${d.publicId}`;
-    orderData.transferContent = d.content || transferContent;
+    if (d.content) {
+      orderData.transferContent = d.content;
+    } else {
+      orderData.transferContent = transferContent;
+    }
     localStorage.setItem('the30_orders', JSON.stringify(state.orders));
     pushCloudEvent('UPSERT_ORDER', { order: orderData });
     return {
       publicId: orderData.apipayPublicId,
-      qrUrl: orderData.apipayQrUrl,
+      content: orderData.transferContent,
       payUrl: orderData.apipayPayUrl
     };
   }
@@ -1685,23 +1689,39 @@ let paymentPollInterval = null;
 let paymentPollTimeout = null;
 let qrAutoCloseTimer = null;
 
-// Âm thanh báo "Ting ting" bằng Web Audio API không cần file MP3 ngoài
+// Âm thanh báo "Ting!" thanh toán thành công trong trẻo như tiếng chuông ngân hàng (Web Audio API)
 function playTingTingSound() {
   try {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     if (!AudioCtx) return;
     const ctx = new AudioCtx();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(880, ctx.currentTime); // Nốt La 5
-    osc.frequency.exponentialRampToValueAtTime(1760, ctx.currentTime + 0.15); // Nốt La 6
-    gain.gain.setValueAtTime(0.3, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.6);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start();
-    osc.stop(ctx.currentTime + 0.6);
+    const now = ctx.currentTime;
+
+    // Tầng âm chính (Fundamental Sine - Nốt Sol 6: 1567.98 Hz tạo tiếng "Ting!" sắc nét)
+    const osc1 = ctx.createOscillator();
+    const gain1 = ctx.createGain();
+    osc1.type = 'sine';
+    osc1.frequency.setValueAtTime(1567.98, now);
+    gain1.gain.setValueAtTime(0.001, now);
+    gain1.gain.linearRampToValueAtTime(0.45, now + 0.008);
+    gain1.gain.exponentialRampToValueAtTime(0.0008, now + 0.95);
+    osc1.connect(gain1);
+    gain1.connect(ctx.destination);
+    osc1.start(now);
+    osc1.stop(now + 0.96);
+
+    // Tầng âm bồi kim loại (Harmonic Overtone - 3135.96 Hz giúp tiếng chuông "Ting" ngân trong trẻo)
+    const osc2 = ctx.createOscillator();
+    const gain2 = ctx.createGain();
+    osc2.type = 'sine';
+    osc2.frequency.setValueAtTime(3135.96, now);
+    gain2.gain.setValueAtTime(0.001, now);
+    gain2.gain.linearRampToValueAtTime(0.18, now + 0.005);
+    gain2.gain.exponentialRampToValueAtTime(0.0005, now + 0.45);
+    osc2.connect(gain2);
+    gain2.connect(ctx.destination);
+    osc2.start(now);
+    osc2.stop(now + 0.46);
   } catch (e) {}
 }
 
@@ -1767,14 +1787,17 @@ function openQrModal(order) {
   accountNameEl.textContent = bankAccountName;
   
   // Cú pháp chuyển khoản chuẩn không dấu gạch ngang để mọi ngân hàng giữ nguyên 100%
-  const transferContent = getOrderTransferContent(order.id);
+  const transferContent = order.transferContent || getOrderTransferContent(order.id);
   contentEl.textContent = transferContent;
 
   const vietQrCode = (bankCode.toUpperCase() === 'VIETINBANK') ? 'ICB' : bankCode;
   const bank = encodeURIComponent(vietQrCode);
   const acc = encodeURIComponent(bankAccount);
   const name = encodeURIComponent(bankAccountName);
-  const vietQrUrl = `https://img.vietqr.io/image/${bank}-${acc}-compact2.png?amount=${order.totalAmount}&addInfo=${encodeURIComponent(transferContent)}&accountName=${name}`;
+  const buildCleanVietQrUrl = (contentStr) =>
+    `https://img.vietqr.io/image/${bank}-${acc}-qr_only.png?amount=${order.totalAmount}&addInfo=${encodeURIComponent(contentStr)}&accountName=${name}`;
+
+  const vietQrUrl = buildCleanVietQrUrl(transferContent);
 
   qrImg.onerror = () => {
     if (qrImg.src !== vietQrUrl) {
@@ -1782,23 +1805,23 @@ function openQrModal(order) {
     }
   };
 
-  // 1. Ưu tiên dùng mã QR chính thức trả về từ ApiPay (nếu có)
-  if (order.apipayQrUrl && order.apipayQrUrl.trim() !== '') {
-    qrImg.src = order.apipayQrUrl;
-  } else if (state.settings.qrImageUrl && state.settings.qrImageUrl.trim() !== '') {
+  // Luôn hiển thị mã QR chính chủ VietQR của THE 30 - COFFEE & TEA (Tuyệt đối không hiện ảnh chứa logo/tên ApiPay)
+  if (state.settings.qrImageUrl && state.settings.qrImageUrl.trim() !== '' && !state.settings.qrImageUrl.includes('apipay.vn')) {
     qrImg.src = state.settings.qrImageUrl;
   } else {
-    // 2. Hiển thị tức thì VietQR chuẩn Napas 24/7 trong lúc đồng bộ Payment Request với ApiPay
     qrImg.src = vietQrUrl;
   }
 
   modal.classList.remove('hidden');
 
-  // 3. Tự động khởi tạo Payment Request trực tiếp trên ApiPay (chạy ngay trên GitHub Pages)
+  // Khởi tạo ngầm Payment Request với ngân hàng để đối soát tự động (Không ghi đè ảnh QR của quán)
   if (!order.apipayPublicId) {
     createApiPayPaymentDirect(order).then(apipayInfo => {
-      if (apipayInfo && apipayInfo.qrUrl && currentPollingOrderId === order.id) {
-        qrImg.src = apipayInfo.qrUrl;
+      if (apipayInfo && apipayInfo.content && currentPollingOrderId === order.id) {
+        contentEl.textContent = apipayInfo.content;
+        if (!state.settings.qrImageUrl || state.settings.qrImageUrl.trim() === '') {
+          qrImg.src = buildCleanVietQrUrl(apipayInfo.content);
+        }
       }
     }).catch(() => {});
   }
