@@ -3,6 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <title>The 30 - Coffee & Tea | the30s.id.vn</title>
   <link rel="icon" type="image/jpeg" href="logo.jpg">
   
@@ -110,22 +113,6 @@
       </div>
     </div>
 
-    <!-- Real-time Order Alert Bar (Tự động hiện khi có đơn mới, bấm vào xem ngay, tự biến mất khi hết đơn) -->
-    <div id="liveOrderAlertBar" class="hidden bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 text-brand-950 font-bold text-xs sm:text-sm py-2 px-4 shadow-md transition-all cursor-pointer border-b border-amber-600/30" onclick="handleOrderAlertClick()">
-      <div class="max-w-7xl mx-auto flex items-center justify-between">
-        <div class="flex items-center gap-2">
-          <span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-white text-amber-600 shadow animate-bounce">
-            <i class="fa-solid fa-bell"></i>
-          </span>
-          <span id="liveOrderAlertText">Có đơn hàng mới đang chờ xử lý!</span>
-        </div>
-        <div class="flex items-center gap-1.5 bg-brand-950 text-white text-xs px-3 py-1 rounded-full hover:bg-black transition shadow">
-          <span>Xem đơn ngay</span>
-          <i class="fa-solid fa-arrow-right text-[10px]"></i>
-        </div>
-      </div>
-    </div>
-
     <!-- Main Nav -->
     <div class="max-w-7xl mx-auto px-4 sm:px-6 py-2.5 sm:py-3 flex items-center justify-between gap-4">
       <!-- Logo & Store Name -->
@@ -167,11 +154,11 @@
           </span>
         </button>
 
-        <!-- Orders Button (Chỉ hiện ở giao diện Quản lý hoặc có đơn mới) -->
+        <!-- Orders Button (CHỈ HIỆN KHI ĐANG Ở GIAO DIỆN QUẢN LÝ ADMIN) -->
         <button id="headerAdminOrdersBtn" onclick="handleHeaderAdminOrdersClick()" class="hidden relative bg-amber-500 hover:bg-amber-600 text-brand-950 px-3.5 sm:px-4 py-2 sm:py-2.5 rounded-full font-extrabold text-sm flex items-center gap-2 shadow-md hover:shadow-lg transition active:scale-95">
           <i class="fa-solid fa-receipt text-base"></i>
-          <span>Đơn đặt hàng</span>
-          <span id="headerAdminOrdersCount" class="bg-brand-900 text-white font-black text-xs px-2 py-0.5 rounded-full min-w-[20px] text-center">
+          <span>Đơn cần xử lý</span>
+          <span id="headerAdminOrdersCount" class="hidden bg-rose-600 text-white font-black text-xs px-2 py-0.5 rounded-full min-w-[20px] text-center">
             0
           </span>
         </button>
@@ -192,6 +179,11 @@
   <!-- ======================================================== -->
   <main id="customerView" class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-4 sm:py-6 space-y-8">
     
+    <!-- KHUNG THEO DÕI ĐƠN HÀNG CỦA RIÊNG KHÁCH HÀNG (Chỉ hiện khi chính khách này vừa đặt đơn) -->
+    <section id="customerOrderTracker" class="hidden">
+      <!-- Rendered dynamically by JS for the customer's own active order -->
+    </section>
+
     <!-- 1. BANNER QUẢNG CÁO CAROUSEL -->
     <section class="relative overflow-hidden rounded-2xl shadow-xl border border-slate-200/80 bg-brand-950">
       <div id="bannerCarousel" class="relative w-full aspect-banner">
@@ -332,12 +324,28 @@
       </div>
     </div>
 
+    <!-- Thanh cảnh báo Đơn hàng mới (CHỈ NẰM TRONG BẢNG QUẢN TRỊ ADMIN) -->
+    <div id="liveOrderAlertBar" class="hidden bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 text-brand-950 font-bold text-xs sm:text-sm py-3 px-4 rounded-xl shadow-md transition-all cursor-pointer border border-amber-600/30" onclick="handleOrderAlertClick()">
+      <div class="flex items-center justify-between gap-2">
+        <div class="flex items-center gap-2.5">
+          <span class="inline-flex items-center justify-center w-7 h-7 rounded-full bg-white text-amber-600 shadow animate-bounce">
+            <i class="fa-solid fa-bell"></i>
+          </span>
+          <span id="liveOrderAlertText">Có đơn hàng mới đang chờ xác nhận!</span>
+        </div>
+        <div class="flex items-center gap-1.5 bg-brand-950 text-white text-xs px-3.5 py-1.5 rounded-full hover:bg-black transition shadow whitespace-nowrap">
+          <span>Xem & xử lý ngay</span>
+          <i class="fa-solid fa-arrow-down text-[10px]"></i>
+        </div>
+      </div>
+    </div>
+
     <!-- Admin Navigation Tabs -->
     <div class="flex items-center gap-2 border-b border-slate-200 pb-2 overflow-x-auto">
       <button onclick="switchAdminTab('orders')" id="adminTabBtn-orders" class="admin-tab-btn px-4 py-2.5 rounded-xl font-bold text-xs sm:text-sm transition flex items-center gap-2 bg-brand-900 text-white shadow-md">
         <i class="fa-solid fa-receipt"></i>
         <span>Đơn đặt hàng</span>
-        <span id="adminPendingCountBadge" class="bg-amber-400 text-brand-950 font-black text-xs px-2 py-0.5 rounded-full ml-1">0</span>
+        <span id="adminPendingCountBadge" class="hidden bg-amber-400 text-brand-950 font-black text-xs px-2 py-0.5 rounded-full ml-1">0</span>
       </button>
       <button onclick="switchAdminTab('products')" id="adminTabBtn-products" class="admin-tab-btn px-4 py-2.5 rounded-xl font-bold text-xs sm:text-sm transition flex items-center gap-2 bg-white text-slate-700 hover:bg-slate-100 border border-slate-200">
         <i class="fa-solid fa-mug-hot"></i>
@@ -439,6 +447,7 @@
             </button>
             <button onclick="setOrderFilter('all')" id="btnOrderFilter-all" class="order-filter-btn px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 whitespace-nowrap">
               <span>Tất cả</span>
+              <span id="tabBadge-all" class="bg-slate-200 text-slate-800 px-1.5 py-0.2 rounded-full text-[10px] font-bold">0</span>
             </button>
           </div>
 
@@ -747,12 +756,12 @@
             </div>
             <div class="flex items-center justify-between">
               <span class="text-slate-500">Ngân hàng:</span>
-              <span id="qrBankDisplay" class="font-bold text-slate-800">-</span>
+              <span id="qrBankDisplay" class="font-bold text-slate-800">VietinBank (ICB)</span>
             </div>
             <div class="flex items-center justify-between">
               <span class="text-slate-500">Số tài khoản:</span>
               <div class="flex items-center gap-1.5">
-                <span id="qrAccountDisplay" class="font-mono font-bold text-slate-800">-</span>
+                <span id="qrAccountDisplay" class="font-mono font-bold text-slate-800">100880871374</span>
                 <button type="button" onclick="copyText(document.getElementById('qrAccountDisplay').textContent, 'Số tài khoản')" class="text-[10px] bg-slate-100 hover:bg-slate-200 px-1.5 py-0.5 rounded text-slate-600" title="Sao chép">
                   <i class="fa-regular fa-copy"></i>
                 </button>
@@ -760,7 +769,7 @@
             </div>
             <div class="flex items-center justify-between">
               <span class="text-slate-500">Chủ tài khoản:</span>
-              <span id="qrAccountNameDisplay" class="font-bold text-slate-800 uppercase text-[11px]">-</span>
+              <span id="qrAccountNameDisplay" class="font-bold text-slate-800 uppercase text-[11px]">THE30s_COFFEE</span>
             </div>
             <div class="flex items-center justify-between bg-amber-50/80 p-2 rounded-lg border border-amber-200/60">
               <div>
@@ -775,12 +784,16 @@
         </div>
 
         <div class="space-y-2 pt-1">
+          <button onclick="confirmCustomerTransfer()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold py-2.5 rounded-xl text-xs sm:text-sm shadow-md transition flex items-center justify-center gap-2">
+            <i class="fa-solid fa-circle-check"></i>
+            <span>Tôi đã chuyển khoản hoàn tất</span>
+          </button>
           <button onclick="checkPaymentManual()" class="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-2 rounded-xl text-xs transition flex items-center justify-center gap-1.5">
             <i class="fa-solid fa-arrows-rotate text-xs"></i>
-            <span>Tôi đã chuyển, kiểm tra ngay</span>
+            <span>Kiểm tra tự động với ngân hàng</span>
           </button>
           <button onclick="closeQrModal()" class="w-full text-slate-400 hover:text-slate-600 text-xs py-1 transition">
-            Đóng cửa sổ
+            Đóng cửa sổ (Xem trạng thái đơn)
           </button>
         </div>
       </div>
@@ -1005,7 +1018,7 @@
     </div>
   </footer>
 
-  <!-- Script ứng dụng -->
-  <script src="app.js"></script>
+  <!-- Script ứng dụng (kèm version chống cache trình duyệt) -->
+  <script src="app.js?v=20261101_v5"></script>
 </body>
 </html>

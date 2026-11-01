@@ -108,6 +108,8 @@ const DEFAULT_BANNERS = [
   }
 ];
 
+const SETTINGS_SCHEMA_VERSION = '20261101_v5';
+
 const DEFAULT_SETTINGS = {
   storeName: 'The 30 - Coffee & Tea',
   hotline: '0949551441 - 0949789483',
@@ -117,7 +119,8 @@ const DEFAULT_SETTINGS = {
   bankAccount: '100880871374',
   bankAccountName: 'THE30s_COFFEE',
   qrImageUrl: '',
-  orderPrefix: 'THE30S'
+  orderPrefix: 'THE30S',
+  settingsVersion: SETTINGS_SCHEMA_VERSION
 };
 
 // --- APPLICATION STATE ---
@@ -125,9 +128,11 @@ let state = {
   products: [],
   banners: [],
   orders: [],
-  settings: DEFAULT_SETTINGS,
+  settings: { ...DEFAULT_SETTINGS },
   cart: [],
   currentUser: null, // { phone, name }
+  myOrderIds: [], // Danh sách mã đơn của riêng khách trên thiết bị này
+  dismissedTrackerIds: [],
   currentCategory: 'all',
   currentSort: 'default',
   searchQuery: '',
@@ -137,13 +142,35 @@ let state = {
   isAdminLoggedIn: false,
   selectedOrderType: 'takeaway',
   activeAdminTab: 'orders',
-  activeOrderFilter: 'active', // Mặc định hiển thị đơn đang cần làm
+  activeOrderFilter: 'active', // Mặc định chỉ hiển thị đơn đang cần xử lý
   orderSearchQuery: '',
   lastPendingCount: 0
 };
 
 // URL API Backend PHP
 const API_URL = 'api.php';
+
+// Hàm ép buộc nâng cấp tài khoản VietinBank chính thức nếu trình duyệt/server còn lưu số cũ
+function enforceOfficialBankSettings() {
+  if (
+    !state.settings ||
+    state.settings.settingsVersion !== SETTINGS_SCHEMA_VERSION ||
+    !state.settings.bankAccount ||
+    state.settings.bankAccount === '0949551441' ||
+    state.settings.bankCode === 'MB'
+  ) {
+    state.settings = {
+      ...DEFAULT_SETTINGS,
+      ...(state.settings || {}),
+      bankCode: 'ICB',
+      bankAccount: '100880871374',
+      bankAccountName: 'THE30s_COFFEE',
+      qrImageUrl: '',
+      settingsVersion: SETTINGS_SCHEMA_VERSION
+    };
+    localStorage.setItem('the30_settings', JSON.stringify(state.settings));
+  }
+}
 
 // Âm thanh chuông báo có đơn hàng mới (Web Audio API không cần file ngoài)
 function playNewOrderSound() {
@@ -182,6 +209,7 @@ function showToast(message, type = 'success') {
   const toast = document.getElementById('toastNotification');
   const msgEl = document.getElementById('toastMessage');
   const iconEl = document.getElementById('toastIcon');
+  if (!toast || !msgEl || !iconEl) return;
 
   msgEl.textContent = message;
   if (type === 'success') {
@@ -198,12 +226,12 @@ function showToast(message, type = 'success') {
   setTimeout(() => {
     toast.classList.remove('translate-y-0', 'opacity-100');
     toast.classList.add('translate-y-24', 'opacity-0');
-  }, 2500);
+  }, 2800);
 }
 
 // --- KHỞI TẠO VÀ ĐỒNG BỘ DỮ LIỆU ---
 async function initApp() {
-  // 1. Phục hồi session người dùng và giỏ hàng từ localStorage
+  // 1. Phục hồi session người dùng, giỏ hàng và danh sách mã đơn của khách từ localStorage
   const savedUser = localStorage.getItem('the30_user');
   if (savedUser) {
     try {
@@ -222,6 +250,15 @@ async function initApp() {
     }
   }
 
+  const savedMyOrders = localStorage.getItem('the30_my_order_ids');
+  if (savedMyOrders) {
+    try {
+      state.myOrderIds = JSON.parse(savedMyOrders);
+    } catch (e) {
+      state.myOrderIds = [];
+    }
+  }
+
   // 2. Tải dữ liệu từ API hoặc fallback LocalStorage
   await loadData();
 
@@ -231,12 +268,13 @@ async function initApp() {
   renderProducts();
   updateCartBadge();
   startBannerCarousel();
+  renderCustomerOrderTracker();
   updateAdminHeaderOrdersCount();
 
-  // 4. Lắng nghe đơn hàng mới tự động theo thời gian thực (mỗi 8 giây)
+  // 4. Lắng nghe trạng thái đơn hàng tự động theo thời gian thực (mỗi 6 giây)
   setInterval(() => {
     loadDataSilently();
-  }, 8000);
+  }, 6000);
 }
 
 async function loadData() {
@@ -250,6 +288,8 @@ async function loadData() {
         state.settings = { ...DEFAULT_SETTINGS, ...(data.settings || {}) };
         state.orders   = data.orders   || [];
         
+        enforceOfficialBankSettings();
+
         // Cache lại vào LocalStorage phòng khi offline
         localStorage.setItem('the30_products', JSON.stringify(state.products));
         localStorage.setItem('the30_banners', JSON.stringify(state.banners));
@@ -270,15 +310,10 @@ async function loadData() {
 
   state.products = cachedProducts ? JSON.parse(cachedProducts) : DEFAULT_PRODUCTS;
   state.banners  = cachedBanners  ? JSON.parse(cachedBanners)  : DEFAULT_BANNERS;
-  
-  let loadedSettings = cachedSettings ? JSON.parse(cachedSettings) : DEFAULT_SETTINGS;
-  // Tự động nâng cấp tài khoản Vietinbank chính thức nếu đang dính số demo cũ
-  if (!loadedSettings.bankAccount || loadedSettings.bankAccount === '0949551441') {
-    loadedSettings = { ...loadedSettings, ...DEFAULT_SETTINGS };
-    localStorage.setItem('the30_settings', JSON.stringify(loadedSettings));
-  }
-  state.settings = loadedSettings;
+  state.settings = cachedSettings ? JSON.parse(cachedSettings) : { ...DEFAULT_SETTINGS };
   state.orders   = cachedOrders   ? JSON.parse(cachedOrders)   : [];
+
+  enforceOfficialBankSettings();
 }
 
 async function loadDataSilently() {
@@ -289,27 +324,45 @@ async function loadDataSilently() {
       if (data && data.success) {
         const oldPending = state.orders.filter(o => o.status === 'pending').length;
         state.orders = data.orders || [];
+        localStorage.setItem('the30_orders', JSON.stringify(state.orders));
         const newPending = state.orders.filter(o => o.status === 'pending').length;
 
-        // Nếu có đơn hàng mới phát sinh -> reo chuông báo
-        if (newPending > oldPending && oldPending !== 0) {
+        // CHỈ reo chuông báo đơn mới khi đang đăng nhập quyền Quản trị Admin
+        if (state.isAdminLoggedIn && newPending > oldPending) {
           playNewOrderSound();
           showToast(`🔔 Có ${newPending - oldPending} đơn hàng mới vừa được đặt!`);
         }
 
+        renderCustomerOrderTracker();
+        updateAdminHeaderOrdersCount();
+        if (state.isAdminLoggedIn && state.activeAdminTab === 'orders') {
+          renderAdminOrders();
+        }
+        return;
+      }
+    }
+  } catch (e) {
+    // Đồng bộ từ LocalStorage nếu mở nhiều tab trên cùng trình duyệt
+    try {
+      const cachedOrders = localStorage.getItem('the30_orders');
+      if (cachedOrders) {
+        state.orders = JSON.parse(cachedOrders);
+        renderCustomerOrderTracker();
         updateAdminHeaderOrdersCount();
         if (state.isAdminLoggedIn && state.activeAdminTab === 'orders') {
           renderAdminOrders();
         }
       }
-    }
-  } catch (e) {}
+    } catch (err) {}
+  }
 }
 
 async function refreshData() {
   await loadData();
   renderProducts();
   renderBanners();
+  renderCustomerOrderTracker();
+  updateAdminHeaderOrdersCount();
   renderAdminOrders();
   renderAdminProducts();
   renderAdminBanners();
@@ -759,7 +812,116 @@ function selectOrderType(type) {
   }
 }
 
-// --- THANH TOÁN & MÃ QR ---
+// Chuyển về trang thực đơn khách hàng khi bấm vào Logo
+function switchCustomerTab(tab = 'menu') {
+  const customerView = document.getElementById('customerView');
+  const adminView = document.getElementById('adminView');
+  if (adminView && !adminView.classList.contains('hidden')) {
+    toggleAdminView();
+  }
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// --- KHUNG THEO DÕI ĐƠN HÀNG CỦA RIÊNG KHÁCH HÀNG (TRANG KHÁCH) ---
+function renderCustomerOrderTracker() {
+  const trackerEl = document.getElementById('customerOrderTracker');
+  if (!trackerEl) return;
+
+  // Chỉ lấy đơn hàng của chính khách trên thiết bị này (hoặc trùng SĐT đang đăng nhập)
+  const myOrders = state.orders.filter(o => {
+    if (state.dismissedTrackerIds && state.dismissedTrackerIds.includes(o.id)) return false;
+    const isMyDeviceOrder = Array.isArray(state.myOrderIds) && state.myOrderIds.includes(o.id);
+    const isMyPhoneOrder = state.currentUser && state.currentUser.phone && o.customerPhone === state.currentUser.phone;
+    return isMyDeviceOrder || isMyPhoneOrder;
+  });
+
+  // Ưu tiên hiển thị đơn đang xử lý hoặc đơn vừa hoàn thành trong vòng 2 giờ gần nhất
+  const recentMyOrders = myOrders.filter(o => {
+    if (['pending', 'preparing', 'shipping'].includes(o.status)) return true;
+    const createdTime = new Date(o.createdAt).getTime();
+    return !isNaN(createdTime) && (Date.now() - createdTime < 2 * 60 * 60 * 1000);
+  });
+
+  if (recentMyOrders.length === 0) {
+    trackerEl.classList.add('hidden');
+    trackerEl.innerHTML = '';
+    return;
+  }
+
+  const latestOrder = recentMyOrders[0];
+  const statusBadge = getOrderStatusBadge(latestOrder.status);
+  const isUnpaid = latestOrder.paymentStatus !== 'paid' && latestOrder.paymentStatus !== 'paid_reported';
+  const stepIndex = latestOrder.status === 'pending' ? 1
+                  : latestOrder.status === 'preparing' ? 2
+                  : latestOrder.status === 'shipping' ? 3
+                  : latestOrder.status === 'completed' ? 4 : 0;
+
+  trackerEl.classList.remove('hidden');
+  trackerEl.innerHTML = `
+    <div class="bg-white rounded-2xl border-2 border-brand-200 shadow-md p-4 sm:p-5 space-y-3.5">
+      <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+        <div class="flex items-center gap-2.5">
+          <span class="w-8 h-8 rounded-full bg-brand-900 text-amber-300 flex items-center justify-center text-sm shadow">
+            <i class="fa-solid fa-mug-hot"></i>
+          </span>
+          <div>
+            <div class="flex items-center gap-2">
+              <h3 class="text-xs sm:text-sm font-extrabold text-brand-900">Đơn hàng của bạn: <span class="font-mono">${latestOrder.id}</span></h3>
+              <span class="text-[11px] font-bold px-2.5 py-0.5 rounded-full ${statusBadge.badgeClass}">${statusBadge.text}</span>
+            </div>
+            <p class="text-[11px] text-slate-500 mt-0.5">
+              ${(latestOrder.items || []).map(i => `${i.quantity}x ${i.name}`).join(', ')} • <strong class="text-brand-900">${formatPrice(latestOrder.totalAmount)}</strong>
+            </p>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2">
+          ${isUnpaid && latestOrder.status !== 'cancelled' && latestOrder.status !== 'completed' ? `
+            <button onclick="reopenOrderQr('${latestOrder.id}')" class="bg-amber-400 hover:bg-amber-300 text-brand-950 text-xs font-extrabold px-3 py-1.5 rounded-xl shadow-sm transition flex items-center gap-1.5">
+              <i class="fa-solid fa-qrcode"></i> Quét mã QR thanh toán
+            </button>
+          ` : ''}
+          <button onclick="dismissCustomerTracker('${latestOrder.id}')" class="text-slate-400 hover:text-slate-600 text-xs px-2 py-1 rounded-lg hover:bg-slate-100 transition" title="Ẩn khung theo dõi">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+      </div>
+
+      ${latestOrder.status !== 'cancelled' ? `
+        <div class="grid grid-cols-4 gap-1.5 pt-1 text-center text-[10px] sm:text-xs font-bold">
+          <div class="p-1.5 rounded-lg ${stepIndex >= 1 ? 'bg-amber-50 text-amber-800 border border-amber-200' : 'bg-slate-50 text-slate-400'}">
+            1. Chờ xác nhận
+          </div>
+          <div class="p-1.5 rounded-lg ${stepIndex >= 2 ? 'bg-blue-50 text-blue-800 border border-blue-200' : 'bg-slate-50 text-slate-400'}">
+            2. Đang pha chế
+          </div>
+          <div class="p-1.5 rounded-lg ${stepIndex >= 3 ? 'bg-purple-50 text-purple-800 border border-purple-200' : 'bg-slate-50 text-slate-400'}">
+            3. Đang giao / Phục vụ
+          </div>
+          <div class="p-1.5 rounded-lg ${stepIndex >= 4 ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-slate-50 text-slate-400'}">
+            4. Hoàn thành
+          </div>
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+function dismissCustomerTracker(orderId) {
+  if (!state.dismissedTrackerIds.includes(orderId)) {
+    state.dismissedTrackerIds.push(orderId);
+  }
+  renderCustomerOrderTracker();
+}
+
+function reopenOrderQr(orderId) {
+  const order = state.orders.find(o => o.id === orderId);
+  if (order) {
+    openQrModal(order);
+  }
+}
+
+// --- THANH TOÁN & MÃ QR VIETQR (VIETINBANK - 100880871374 - THE30s_COFFEE) ---
 async function handleProceedToOrder() {
   if (state.cart.length === 0) {
     alert('Giỏ hàng của bạn đang trống.');
@@ -801,7 +963,7 @@ async function handleProceedToOrder() {
     })),
     totalAmount: totalAmount,
     status: 'pending',
-    paymentStatus: 'paid_qr_pending',
+    paymentStatus: 'unpaid',
     createdAt: new Date().toISOString()
   };
 
@@ -816,9 +978,23 @@ async function handleProceedToOrder() {
     console.warn('Lưu đơn vào LocalStorage');
   }
 
-  // Luôn lưu vào LocalStorage đơn hàng
+  // Lưu vào LocalStorage đơn hàng và ghi nhận đây là đơn của khách này
   state.orders.unshift(orderData);
   localStorage.setItem('the30_orders', JSON.stringify(state.orders));
+
+  if (!Array.isArray(state.myOrderIds)) state.myOrderIds = [];
+  if (!state.myOrderIds.includes(orderId)) {
+    state.myOrderIds.unshift(orderId);
+    localStorage.setItem('the30_my_order_ids', JSON.stringify(state.myOrderIds));
+  }
+
+  // Làm trống giỏ hàng sau khi tạo đơn
+  state.cart = [];
+  saveCart();
+  updateCartBadge();
+  renderProducts();
+  renderCustomerOrderTracker();
+  updateAdminHeaderOrdersCount();
 
   // Đóng Drawer giỏ hàng & Mở Modal Mã QR Thanh Toán
   closeCartDrawer();
@@ -874,6 +1050,8 @@ function fallbackCopy(text, label) {
 }
 
 function openQrModal(order) {
+  enforceOfficialBankSettings();
+
   const modal = document.getElementById('qrModal');
   const qrImg = document.getElementById('qrImageDisplay');
   const orderIdEl = document.getElementById('qrOrderIdDisplay');
@@ -892,11 +1070,17 @@ function openQrModal(order) {
   currentPollingOrderId = order.id;
   state.currentQrAmount = order.totalAmount;
 
+  const bankCode = state.settings.bankCode || 'ICB';
+  const bankAccount = state.settings.bankAccount || '100880871374';
+  const bankAccountName = state.settings.bankAccountName || 'THE30s_COFFEE';
+
   orderIdEl.textContent = order.id;
   amountEl.textContent = formatPrice(order.totalAmount);
-  bankEl.textContent = (state.settings.bankCode === 'ICB' ? 'VietinBank (ICB)' : (state.settings.bankCode || 'VietinBank'));
-  accountEl.textContent = state.settings.bankAccount || '100880871374';
-  accountNameEl.textContent = state.settings.bankAccountName || 'THE30s_COFFEE';
+  bankEl.textContent = (bankCode === 'ICB' || bankCode.toUpperCase() === 'VIETINBANK')
+    ? 'VietinBank (ICB)'
+    : bankCode;
+  accountEl.textContent = bankAccount;
+  accountNameEl.textContent = bankAccountName;
   
   // Cú pháp chuyển khoản chuẩn: THE30 [Mã_Đơn]
   const transferContent = `THE30 ${order.id}`;
@@ -906,11 +1090,12 @@ function openQrModal(order) {
   if (state.settings.qrImageUrl && state.settings.qrImageUrl.trim() !== '') {
     qrImg.src = state.settings.qrImageUrl;
   } else {
-    // Tự động sinh VietQR chuẩn ngân hàng Napas 24/7 theo số tiền và nội dung
-    const bank = encodeURIComponent(state.settings.bankCode || 'ICB');
-    const acc = encodeURIComponent(state.settings.bankAccount || '100880871374');
-    const name = encodeURIComponent(state.settings.bankAccountName || 'THE30s_COFFEE');
-    const vietQrUrl = `https://img.vietqr.io/image/${bank}-${acc}-compact2.jpg?amount=${order.totalAmount}&addInfo=${encodeURIComponent(transferContent)}&accountName=${name}`;
+    // Tự động sinh VietQR chuẩn ngân hàng Napas 24/7 (VietinBank - 100880871374 - THE30s_COFFEE)
+    const vietQrCode = (bankCode.toUpperCase() === 'VIETINBANK') ? 'ICB' : bankCode;
+    const bank = encodeURIComponent(vietQrCode);
+    const acc = encodeURIComponent(bankAccount);
+    const name = encodeURIComponent(bankAccountName);
+    const vietQrUrl = `https://img.vietqr.io/image/${bank}-${acc}-compact2.png?amount=${order.totalAmount}&addInfo=${encodeURIComponent(transferContent)}&accountName=${name}`;
     qrImg.src = vietQrUrl;
   }
 
@@ -949,27 +1134,76 @@ async function checkPaymentStatus(orderId) {
     const res = await fetch(`${API_URL}?action=check_payment_status&orderId=${encodeURIComponent(orderId)}`);
     if (res.ok) {
       const data = await res.json();
-      if (data && data.success && data.paid) {
-        onPaymentSuccess(orderId);
+      if (data && data.success && (data.paid || data.isPaid || data.paymentStatus === 'paid')) {
+        onPaymentSuccess(orderId, false);
         return true;
       }
     }
   } catch (err) {}
+
+  // Kiểm tra đồng bộ trong LocalStorage
+  try {
+    const cachedOrders = JSON.parse(localStorage.getItem('the30_orders') || '[]');
+    const found = cachedOrders.find(o => o.id === orderId);
+    if (found && found.paymentStatus === 'paid') {
+      onPaymentSuccess(orderId, false);
+      return true;
+    }
+  } catch (e) {}
+
   return false;
 }
 
 async function checkPaymentManual() {
   if (!currentPollingOrderId) return;
-  showToast('Đang kiểm tra với ngân hàng...', 'info');
+  showToast('Đang kiểm tra giao dịch tự động với ngân hàng...', 'info');
   const isPaid = await checkPaymentStatus(currentPollingOrderId);
   if (!isPaid) {
-    showToast('Chưa nhận được giao dịch. Vui lòng kiểm tra lại app ngân hàng hoặc đợi trong giây lát!', 'warning');
+    showToast('Nếu bạn đã chuyển khoản xong, hãy bấm nút màu xanh "Tôi đã chuyển khoản hoàn tất"!', 'warning');
   }
 }
 
-function onPaymentSuccess(orderId) {
+// Khi khách bấm "Tôi đã chuyển khoản hoàn tất"
+async function confirmCustomerTransfer() {
+  if (!currentPollingOrderId) return;
+  const orderId = currentPollingOrderId;
+
+  // Kiểm tra webhook ApiPay trước
+  const autoPaid = await checkPaymentStatus(orderId);
+  if (autoPaid) return;
+
+  // Ghi nhận khách đã báo chuyển khoản để quán xử lý ngay
+  const order = state.orders.find(o => o.id === orderId);
+  if (order) {
+    order.paymentStatus = 'paid_reported';
+    localStorage.setItem('the30_orders', JSON.stringify(state.orders));
+  }
+
+  try {
+    await fetch(`${API_URL}?action=update_order_status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orderId, paymentStatus: 'paid_reported' })
+    });
+  } catch (e) {}
+
+  onPaymentSuccess(orderId, true);
+}
+
+function onPaymentSuccess(orderId, isCustomerReported = false) {
   stopPaymentPolling();
   playTingTingSound();
+
+  const order = state.orders.find(o => o.id === orderId);
+  if (order) {
+    if (!isCustomerReported) {
+      order.paymentStatus = 'paid';
+      order.status = 'preparing';
+    } else if (order.paymentStatus !== 'paid') {
+      order.paymentStatus = 'paid_reported';
+    }
+    localStorage.setItem('the30_orders', JSON.stringify(state.orders));
+  }
 
   const waitingBox = document.getElementById('qrWaitingContainer');
   const successBox = document.getElementById('qrSuccessContainer');
@@ -979,23 +1213,20 @@ function onPaymentSuccess(orderId) {
   if (successBox) successBox.classList.remove('hidden');
   if (successOrderId) successOrderId.textContent = orderId;
 
-  // Dọn sạch giỏ hàng
-  state.cart = [];
-  saveCart();
-  updateCartBadge();
-  renderProducts();
+  renderCustomerOrderTracker();
+  updateAdminHeaderOrdersCount();
+  if (state.isAdminLoggedIn && state.activeAdminTab === 'orders') {
+    renderAdminOrders();
+  }
 
-  showToast('Ting ting! Đã nhận thanh toán thành công!');
+  showToast('Đã ghi nhận thanh toán đơn hàng thành công!');
 }
 
 function closeQrModal() {
   stopPaymentPolling();
   document.getElementById('qrModal').classList.add('hidden');
   currentPollingOrderId = null;
-  state.cart = [];
-  saveCart();
-  updateCartBadge();
-  renderProducts();
+  renderCustomerOrderTracker();
 }
 
 function handleConfirmPaymentSuccess() {
@@ -1011,47 +1242,58 @@ function updateAdminHeaderOrdersCount() {
   const activeOrders = pendingOrders + preparingOrders + shippingOrders;
   const completedOrders = state.orders.filter(o => o.status === 'completed').length;
   const cancelledOrders = state.orders.filter(o => o.status === 'cancelled').length;
+  const totalOrdersCount = state.orders.length;
   const totalRevenue = state.orders
     .filter(o => o.status === 'completed')
     .reduce((sum, o) => sum + (o.totalAmount || 0), 0);
 
-  // 1. Thanh thông báo màu vàng/cam trên cùng (Live Order Alert Bar)
+  const adminView = document.getElementById('adminView');
+  const isViewingAdmin = Boolean(state.isAdminLoggedIn && adminView && !adminView.classList.contains('hidden'));
+
+  // 1. Thanh thông báo màu vàng/cam (CHỈ HIỆN TRONG TRANG ADMIN KHI CÓ ĐƠN MỚI, TỰ BIẾN MẤT KHI HẾT ĐƠN)
   const alertBar = document.getElementById('liveOrderAlertBar');
   const alertText = document.getElementById('liveOrderAlertText');
   if (alertBar && alertText) {
-    if (pendingOrders > 0) {
-      alertText.textContent = `Có ${pendingOrders} đơn hàng mới đang chờ xác nhận!`;
+    if (isViewingAdmin && pendingOrders > 0) {
+      alertText.textContent = `🔔 Có ${pendingOrders} đơn hàng mới đang chờ xác nhận! Bấm vào đây để xem & xử lý ngay`;
       alertBar.classList.remove('hidden');
     } else {
-      alertBar.classList.add('hidden'); // Tự động ẩn khi không có đơn mới
+      alertBar.classList.add('hidden');
     }
   }
 
-  // 2. Nút Đơn đặt hàng trên Header
+  // 2. Nút Đơn cần xử lý trên Header (TUYỆT ĐỐI KHÔNG HIỆN Ở TRANG KHÁCH HÀNG)
   const headerOrdersBadge = document.getElementById('headerAdminOrdersCount');
   const headerOrdersBtn = document.getElementById('headerAdminOrdersBtn');
-  if (headerOrdersBadge) {
-    if (pendingOrders > 0) {
-      headerOrdersBadge.textContent = pendingOrders;
-      headerOrdersBadge.className = 'bg-rose-500 text-white font-black text-xs px-2 py-0.5 rounded-full min-w-[20px] text-center animate-pulse';
-      if (headerOrdersBtn) headerOrdersBtn.classList.remove('hidden');
-    } else {
-      headerOrdersBadge.textContent = '0';
-      headerOrdersBadge.className = 'bg-brand-900 text-brand-200 font-bold text-xs px-2 py-0.5 rounded-full min-w-[20px] text-center';
-      if (!state.isAdminLoggedIn && headerOrdersBtn) {
-        headerOrdersBtn.classList.add('hidden');
+  if (headerOrdersBtn) {
+    if (isViewingAdmin) {
+      headerOrdersBtn.classList.remove('hidden');
+      if (headerOrdersBadge) {
+        if (pendingOrders > 0) {
+          headerOrdersBadge.textContent = pendingOrders;
+          headerOrdersBadge.className = 'bg-rose-600 text-white font-black text-xs px-2 py-0.5 rounded-full min-w-[20px] text-center animate-pulse';
+          headerOrdersBadge.classList.remove('hidden');
+        } else {
+          // Tự động ẩn số đếm khi không còn đơn chờ xác nhận (không hiện số 0 cứng)
+          headerOrdersBadge.textContent = '';
+          headerOrdersBadge.classList.add('hidden');
+        }
       }
+    } else {
+      headerOrdersBtn.classList.add('hidden');
     }
   }
 
-  // 3. Tab Badge trong Menu Quản lý
+  // 3. Tab Badge trên nút "Đơn đặt hàng" trong Menu Quản lý (tự ẩn khi bằng 0)
   const adminPendingBadge = document.getElementById('adminPendingCountBadge');
   if (adminPendingBadge) {
-    adminPendingBadge.textContent = pendingOrders;
     if (pendingOrders > 0) {
+      adminPendingBadge.textContent = pendingOrders;
       adminPendingBadge.className = 'bg-amber-400 text-brand-950 font-black text-xs px-2 py-0.5 rounded-full ml-1 animate-pulse';
+      adminPendingBadge.classList.remove('hidden');
     } else {
-      adminPendingBadge.className = 'bg-brand-800 text-brand-200 font-bold text-xs px-2 py-0.5 rounded-full ml-1';
+      adminPendingBadge.textContent = '';
+      adminPendingBadge.classList.add('hidden');
     }
   }
 
@@ -1072,15 +1314,17 @@ function updateAdminHeaderOrdersCount() {
   const bShip = document.getElementById('tabBadge-shipping');
   const bComp = document.getElementById('tabBadge-completed');
   const bCanc = document.getElementById('tabBadge-cancelled');
+  const bAll = document.getElementById('tabBadge-all');
   if (bActive) bActive.textContent = activeOrders;
   if (bPending) bPending.textContent = pendingOrders;
   if (bPrep) bPrep.textContent = preparingOrders;
   if (bShip) bShip.textContent = shippingOrders;
   if (bComp) bComp.textContent = completedOrders;
   if (bCanc) bCanc.textContent = cancelledOrders;
+  if (bAll) bAll.textContent = totalOrdersCount;
 }
 
-// Bấm vào thông báo đơn mới -> Mở ngay tab Đơn hàng chờ duyệt
+// Bấm vào thông báo đơn mới hoặc nút Đơn cần xử lý -> Mở ngay danh sách đơn và cuộn mượt tới đó
 function handleOrderAlertClick() {
   if (!state.isAdminLoggedIn) {
     document.getElementById('adminPinModal').classList.remove('hidden');
@@ -1095,12 +1339,17 @@ function handleOrderAlertClick() {
     adminView.classList.remove('hidden');
     document.getElementById('adminToggleText').textContent = 'Trang Khách';
     const cartBtn = document.getElementById('headerCartBtn');
-    const adminOrdersBtn = document.getElementById('headerAdminOrdersBtn');
     if (cartBtn) cartBtn.classList.add('hidden');
-    if (adminOrdersBtn) adminOrdersBtn.classList.remove('hidden');
   }
   switchAdminTab('orders');
-  setOrderFilter('pending');
+  const hasPending = state.orders.some(o => o.status === 'pending');
+  setOrderFilter(hasPending ? 'pending' : 'active');
+  updateAdminHeaderOrdersCount();
+
+  const ordersListEl = document.getElementById('adminOrdersList');
+  if (ordersListEl) {
+    ordersListEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 }
 
 function handleHeaderAdminOrdersClick() {
@@ -1148,7 +1397,7 @@ function toggleAdminView() {
     adminView.classList.remove('hidden');
     toggleText.textContent = 'Trang Khách';
 
-    // Đổi nút Header: Ẩn Giỏ hàng, Hiện Đơn đặt hàng
+    // Đổi nút Header: Ẩn Giỏ hàng, Hiện Đơn cần xử lý
     if (cartBtn) cartBtn.classList.add('hidden');
     if (adminOrdersBtn) adminOrdersBtn.classList.remove('hidden');
     updateAdminHeaderOrdersCount();
@@ -1160,9 +1409,11 @@ function toggleAdminView() {
     adminView.classList.add('hidden');
     toggleText.textContent = 'Quản lý';
 
-    // Hiện lại nút Giỏ hàng, ẩn nút Đơn đặt hàng
+    // Hiện lại nút Giỏ hàng, ẨN HOÀN TOÀN nút Đơn đặt hàng và thông báo Admin
     if (cartBtn) cartBtn.classList.remove('hidden');
     if (adminOrdersBtn) adminOrdersBtn.classList.add('hidden');
+    updateAdminHeaderOrdersCount();
+    renderCustomerOrderTracker();
   }
 }
 
@@ -1207,7 +1458,146 @@ function switchAdminTab(tabKey) {
   if (tabKey === 'settings') populateSettingsForm();
 }
 
-// 1. Quản lý đơn hàng
+// Thẻ hiển thị từng đơn hàng trong Admin
+function renderSingleAdminOrderCard(order) {
+  const statusInfo = getOrderStatusBadge(order.status);
+  const paymentBadge = getPaymentStatusBadge(order.paymentStatus);
+  const isCompleted = (order.status === 'completed');
+  const isCancelled = (order.status === 'cancelled');
+
+  return `
+    <div class="bg-white rounded-xl border ${isCompleted ? 'border-emerald-200 bg-emerald-50/20' : isCancelled ? 'border-rose-200 bg-rose-50/10 opacity-80' : 'border-slate-200'} p-4 sm:p-5 shadow-sm hover:shadow-md transition space-y-3">
+      <!-- Hàng đầu: Mã đơn, Thời gian, Thanh toán & Trạng thái -->
+      <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="font-mono font-extrabold text-sm sm:text-base text-brand-900 bg-brand-50 px-2.5 py-0.5 rounded border border-brand-200">
+            ${order.id}
+          </span>
+          <span class="text-xs text-slate-400">
+            <i class="fa-regular fa-clock mr-1"></i>${formatDate(order.createdAt)}
+          </span>
+          <span class="text-[11px] font-bold px-2.5 py-0.5 rounded-full ${paymentBadge.badgeClass}">
+            ${paymentBadge.text}
+          </span>
+          ${order.completedAt ? `
+            <span class="text-[11px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded font-semibold border border-emerald-200 hidden sm:inline">
+              <i class="fa-solid fa-check mr-1"></i>Xong lúc: ${formatDate(order.completedAt)}
+            </span>
+          ` : ''}
+        </div>
+
+        <div class="flex items-center gap-2">
+          <span class="text-xs font-bold px-2.5 py-1 rounded-full ${statusInfo.badgeClass}">
+            ${statusInfo.text}
+          </span>
+          <button onclick="deleteOrder('${order.id}')" class="text-slate-300 hover:text-rose-600 p-1 rounded transition" title="Xóa đơn này">
+            <i class="fa-solid fa-trash-can text-xs"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- Thông tin khách hàng & Hình thức nhận -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs bg-slate-50 p-2.5 rounded-lg border border-slate-100">
+        <div>
+          <span class="text-slate-500">Khách hàng:</span>
+          <span class="font-bold text-slate-800 ml-1">${order.customerName}</span>
+          <a href="tel:${order.customerPhone}" class="text-brand-900 font-mono font-bold hover:underline ml-2">
+            <i class="fa-solid fa-phone text-[10px]"></i> ${order.customerPhone}
+          </a>
+        </div>
+        <div>
+          <span class="text-slate-500">Hình thức:</span>
+          <span class="font-bold text-slate-800 ml-1">${getOrderTypeName(order.orderType)}</span>
+          ${order.address ? `<span class="text-amber-800 bg-amber-50 px-1.5 py-0.5 rounded font-medium ml-1">(${order.address})</span>` : ''}
+        </div>
+      </div>
+
+      <!-- Chi tiết các món được gọi -->
+      <div class="space-y-1.5 pt-1">
+        <p class="text-xs font-bold text-slate-700 flex items-center justify-between">
+          <span>Chi tiết món đã gọi:</span>
+          <span class="text-[11px] font-semibold text-slate-400">Tổng ${order.items ? order.items.reduce((s, i) => s + i.quantity, 0) : 0} phần</span>
+        </p>
+        <div class="divide-y divide-slate-100 bg-white border border-slate-200 rounded-lg p-3 space-y-2">
+          ${(order.items || []).map(item => `
+            <div class="flex items-start justify-between text-xs pt-1.5 first:pt-0">
+              <div>
+                <span class="font-black text-brand-900">${item.quantity}x</span>
+                <span class="font-bold text-slate-800 ml-1">${item.name}</span>
+                ${item.note ? `
+                  <div class="text-[11px] text-amber-700 font-semibold bg-amber-50 px-2 py-0.5 rounded inline-block mt-0.5">
+                    <i class="fa-solid fa-pen-nib mr-1 text-[10px]"></i> Lưu ý: "${item.note}"
+                  </div>
+                ` : ''}
+              </div>
+              <span class="font-bold text-slate-700">${formatPrice(item.price * item.quantity)}</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+
+      <!-- Tổng tiền và nút chuyển trạng thái -->
+      <div class="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100">
+        <div class="text-xs">
+          <span class="text-slate-500">Tổng thanh toán:</span>
+          <span class="text-base font-black text-brand-900 ml-1">${formatPrice(order.totalAmount)}</span>
+        </div>
+
+        <!-- Nút đổi trạng thái đơn (Mọi đơn đang làm đều có nút Hoàn thành ngay 1 chạm) -->
+        <div class="flex flex-wrap items-center gap-1.5">
+          ${order.status === 'pending' ? `
+            <button onclick="updateOrderStatus('${order.id}', 'preparing')" class="bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition shadow-sm flex items-center gap-1">
+              <i class="fa-solid fa-mug-hot"></i> Nhận & Pha chế
+            </button>
+            <button onclick="updateOrderStatus('${order.id}', 'completed')" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition shadow-sm flex items-center gap-1">
+              <i class="fa-solid fa-check"></i> Hoàn thành ngay
+            </button>
+            <button onclick="updateOrderStatus('${order.id}', 'cancelled')" class="bg-slate-200 hover:bg-rose-100 hover:text-rose-700 text-slate-600 text-xs font-semibold px-2.5 py-1.5 rounded-lg transition">
+              Hủy đơn
+            </button>
+          ` : ''}
+
+          ${order.status === 'preparing' ? `
+            <button onclick="updateOrderStatus('${order.id}', 'shipping')" class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition shadow-sm flex items-center gap-1">
+              <i class="fa-solid fa-motorcycle"></i> Giao món
+            </button>
+            <button onclick="updateOrderStatus('${order.id}', 'completed')" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3.5 py-1.5 rounded-lg transition shadow-sm flex items-center gap-1">
+              <i class="fa-solid fa-check"></i> Hoàn thành đơn
+            </button>
+            <button onclick="updateOrderStatus('${order.id}', 'cancelled')" class="bg-slate-200 hover:bg-rose-100 hover:text-rose-700 text-slate-600 text-xs font-semibold px-2.5 py-1.5 rounded-lg transition">
+              Hủy
+            </button>
+          ` : ''}
+
+          ${order.status === 'shipping' ? `
+            <button onclick="updateOrderStatus('${order.id}', 'completed')" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3.5 py-1.5 rounded-lg transition shadow-sm flex items-center gap-1">
+              <i class="fa-solid fa-check"></i> Hoàn thành đơn
+            </button>
+          ` : ''}
+
+          ${order.status === 'completed' ? `
+            <div class="flex items-center gap-2">
+              <span class="text-xs text-emerald-700 font-bold bg-emerald-100 px-3 py-1 rounded-full flex items-center gap-1">
+                <i class="fa-solid fa-circle-check"></i> Đã hoàn thành
+              </span>
+              <button onclick="updateOrderStatus('${order.id}', 'preparing')" class="text-[11px] text-slate-400 hover:text-slate-600 underline" title="Chuyển lại về đang làm nếu bấm nhầm">
+                Hoàn tác
+              </button>
+            </div>
+          ` : ''}
+
+          ${order.status === 'cancelled' ? `
+            <span class="text-xs text-rose-600 font-bold bg-rose-50 px-3 py-1 rounded-full flex items-center gap-1 border border-rose-200">
+              <i class="fa-solid fa-ban"></i> Đơn đã hủy
+            </span>
+          ` : ''}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// 1. Quản lý đơn hàng (Tách biệt nghiêm ngặt Đơn đang làm và Đơn đã hoàn thành)
 function renderAdminOrders() {
   const container = document.getElementById('adminOrdersList');
   if (!container) return;
@@ -1218,9 +1608,16 @@ function renderAdminOrders() {
   const filter = state.activeOrderFilter || 'active';
   let list = [...state.orders];
 
-  // Phân loại đơn hàng nghiêm ngặt:
+  // Chuẩn hóa status cho các đơn cũ nếu thiếu
+  list.forEach(o => {
+    if (!['pending', 'preparing', 'shipping', 'completed', 'cancelled'].includes(o.status)) {
+      o.status = 'pending';
+    }
+  });
+
+  // Phân loại đơn hàng nghiêm ngặt theo từng mục:
   if (filter === 'active') {
-    // Chỉ hiển thị đơn cần làm (chờ xác nhận, đang pha chế, đang giao) - KHÔNG LẪN đơn hoàn thành
+    // CHỈ hiển thị đơn cần làm (chờ xác nhận, đang pha chế, đang giao) - TUYỆT ĐỐI KHÔNG LẪN ĐƠN HOÀN THÀNH
     list = list.filter(o => ['pending', 'preparing', 'shipping'].includes(o.status));
   } else if (filter === 'completed') {
     // Chỉ hiển thị riêng các đơn đã hoàn thành
@@ -1251,16 +1648,16 @@ function renderAdminOrders() {
 
     if (filter === 'active') {
       emptyIcon = 'fa-circle-check text-emerald-500';
-      emptyTitle = '🎉 Tuyệt vời! Đã xử lý hết đơn cần làm.';
-      emptySub = 'Hiện không có đơn nào đang chờ nhận hoặc pha chế. Toàn bộ đơn đã được chuyển sang mục "Đã hoàn thành".';
+      emptyTitle = '🎉 Tuyệt vời! Không còn đơn nào đang chờ xử lý.';
+      emptySub = 'Toàn bộ đơn hàng đã hoàn tất đều đã được tự động chuyển sang mục "✅ Đã hoàn thành".';
     } else if (filter === 'pending') {
       emptyIcon = 'fa-bell-slash text-slate-400';
       emptyTitle = 'Không có đơn mới nào đang chờ xác nhận.';
-      emptySub = 'Khi khách đặt món, chuông và thông báo màu vàng sẽ lập tức xuất hiện.';
+      emptySub = 'Khi khách đặt món mới, thông báo sẽ lập tức xuất hiện tại đây.';
     } else if (filter === 'completed') {
       emptyIcon = 'fa-receipt text-slate-300';
       emptyTitle = 'Chưa có đơn hàng nào trong mục Đã hoàn thành.';
-      emptySub = 'Sau khi bạn bấm nút "Hoàn thành" ở một đơn đang làm, đơn đó sẽ tự động chuyển vào đây để lưu trữ.';
+      emptySub = 'Khi bạn bấm "Hoàn thành đơn", đơn hàng sẽ tự động chuyển sang mục này.';
     }
 
     container.innerHTML = `
@@ -1270,9 +1667,9 @@ function renderAdminOrders() {
         </div>
         <h4 class="text-sm sm:text-base font-extrabold text-slate-800">${emptyTitle}</h4>
         <p class="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">${emptySub}</p>
-        ${filter !== 'all' ? `
-          <button onclick="setOrderFilter('all')" class="mt-2 text-xs font-bold text-brand-900 bg-brand-50 hover:bg-brand-100 px-3.5 py-1.5 rounded-lg border border-brand-200 transition">
-            Xem toàn bộ tất cả đơn hàng
+        ${filter === 'active' && state.orders.some(o => o.status === 'completed') ? `
+          <button onclick="setOrderFilter('completed')" class="mt-2 text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 px-4 py-2 rounded-xl border border-emerald-200 transition">
+            <i class="fa-solid fa-circle-check mr-1"></i> Xem các đơn Đã hoàn thành (${state.orders.filter(o => o.status === 'completed').length})
           </button>
         ` : ''}
       </div>
@@ -1280,131 +1677,41 @@ function renderAdminOrders() {
     return;
   }
 
-  container.innerHTML = list.map(order => {
-    const statusInfo = getOrderStatusBadge(order.status);
-    const isCompleted = (order.status === 'completed');
-    const isCancelled = (order.status === 'cancelled');
+  // Nếu đang xem tab "Tất cả" (all), tách rõ 2 khu vực: Đơn đang xử lý ở trên & Đơn đã hoàn thành/hủy ở dưới để không bao giờ trộn lẫn
+  if (filter === 'all') {
+    const activeGroup = list.filter(o => ['pending', 'preparing', 'shipping'].includes(o.status));
+    const finishedGroup = list.filter(o => ['completed', 'cancelled'].includes(o.status));
 
-    return `
-      <div class="bg-white rounded-xl border ${isCompleted ? 'border-emerald-200 bg-emerald-50/20' : 'border-slate-200'} p-4 sm:p-5 shadow-sm hover:shadow-md transition space-y-3">
-        <!-- Hàng đầu: Mã đơn, Thời gian & Trạng thái -->
-        <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
-          <div class="flex items-center gap-2">
-            <span class="font-mono font-extrabold text-sm sm:text-base text-brand-900 bg-brand-50 px-2 py-0.5 rounded border border-brand-200">
-              ${order.id}
-            </span>
-            <span class="text-xs text-slate-400">
-              <i class="fa-regular fa-clock mr-1"></i>${formatDate(order.createdAt)}
-            </span>
-            ${order.completedAt ? `
-              <span class="text-[11px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded font-semibold border border-emerald-200 hidden sm:inline">
-                <i class="fa-solid fa-check mr-1"></i>Xong lúc: ${formatDate(order.completedAt)}
-              </span>
-            ` : ''}
+    let html = '';
+    if (activeGroup.length > 0) {
+      html += `
+        <div class="space-y-3">
+          <div class="flex items-center gap-2 text-xs font-extrabold uppercase tracking-wider text-amber-800 bg-amber-50 px-3 py-2 rounded-lg border border-amber-200">
+            <i class="fa-solid fa-fire text-amber-600"></i>
+            <span>Đơn hàng đang cần xử lý (${activeGroup.length})</span>
           </div>
-
-          <div class="flex items-center gap-2">
-            <span class="text-xs font-bold px-2.5 py-1 rounded-full ${statusInfo.badgeClass}">
-              ${statusInfo.text}
-            </span>
-          </div>
+          ${activeGroup.map(o => renderSingleAdminOrderCard(o)).join('')}
         </div>
-
-        <!-- Thông tin khách hàng & Hình thức nhận -->
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs bg-slate-50 p-2.5 rounded-lg border border-slate-100">
-          <div>
-            <span class="text-slate-500">Khách hàng:</span>
-            <span class="font-bold text-slate-800 ml-1">${order.customerName}</span>
-            <a href="tel:${order.customerPhone}" class="text-brand-900 font-mono font-bold hover:underline ml-2">
-              <i class="fa-solid fa-phone text-[10px]"></i> ${order.customerPhone}
-            </a>
+      `;
+    }
+    if (finishedGroup.length > 0) {
+      html += `
+        <div class="space-y-3 pt-4">
+          <div class="flex items-center justify-between text-xs font-extrabold uppercase tracking-wider text-emerald-800 bg-emerald-50 px-3 py-2 rounded-lg border border-emerald-200">
+            <div class="flex items-center gap-2">
+              <i class="fa-solid fa-circle-check text-emerald-600"></i>
+              <span>Đơn hàng đã hoàn thành & lịch sử (${finishedGroup.length})</span>
+            </div>
           </div>
-          <div>
-            <span class="text-slate-500">Hình thức:</span>
-            <span class="font-bold text-slate-800 ml-1">${getOrderTypeName(order.orderType)}</span>
-            ${order.address ? `<span class="text-amber-800 bg-amber-50 px-1.5 py-0.5 rounded font-medium ml-1">(${order.address})</span>` : ''}
-          </div>
+          ${finishedGroup.map(o => renderSingleAdminOrderCard(o)).join('')}
         </div>
+      `;
+    }
+    container.innerHTML = html;
+    return;
+  }
 
-        <!-- Chi tiết các món được gọi -->
-        <div class="space-y-1.5 pt-1">
-          <p class="text-xs font-bold text-slate-700 flex items-center justify-between">
-            <span>Chi tiết món đã gọi:</span>
-            <span class="text-[11px] font-semibold text-slate-400">Tổng ${order.items ? order.items.reduce((s, i) => s + i.quantity, 0) : 0} phần</span>
-          </p>
-          <div class="divide-y divide-slate-100 bg-white border border-slate-200 rounded-lg p-3 space-y-2">
-            ${(order.items || []).map(item => `
-              <div class="flex items-start justify-between text-xs pt-1.5 first:pt-0">
-                <div>
-                  <span class="font-black text-brand-900">${item.quantity}x</span>
-                  <span class="font-bold text-slate-800 ml-1">${item.name}</span>
-                  <!-- Chú thích riêng của món -->
-                  ${item.note ? `
-                    <div class="text-[11px] text-amber-700 font-semibold bg-amber-50 px-2 py-0.5 rounded inline-block mt-0.5">
-                      <i class="fa-solid fa-pen-nib mr-1 text-[10px]"></i> Lưu ý: "${item.note}"
-                    </div>
-                  ` : ''}
-                </div>
-                <span class="font-bold text-slate-700">${formatPrice(item.price * item.quantity)}</span>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-
-        <!-- Tổng tiền và nút chuyển trạng thái -->
-        <div class="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100">
-          <div class="text-xs">
-            <span class="text-slate-500">Tổng thanh toán:</span>
-            <span class="text-base font-black text-brand-900 ml-1">${formatPrice(order.totalAmount)}</span>
-          </div>
-
-          <!-- Nút đổi trạng thái đơn -->
-          <div class="flex items-center gap-1.5">
-            ${order.status === 'pending' ? `
-              <button onclick="updateOrderStatus('${order.id}', 'preparing')" class="bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition shadow-sm flex items-center gap-1">
-                <i class="fa-solid fa-mug-hot"></i> Bắt đầu pha chế
-              </button>
-              <button onclick="updateOrderStatus('${order.id}', 'cancelled')" class="bg-slate-200 hover:bg-rose-100 hover:text-rose-700 text-slate-600 text-xs font-semibold px-2.5 py-1.5 rounded-lg transition">
-                Hủy đơn
-              </button>
-            ` : ''}
-
-            ${order.status === 'preparing' ? `
-              <button onclick="updateOrderStatus('${order.id}', 'shipping')" class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition shadow-sm flex items-center gap-1">
-                <i class="fa-solid fa-motorcycle"></i> Giao món
-              </button>
-              <button onclick="updateOrderStatus('${order.id}', 'completed')" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3.5 py-1.5 rounded-lg transition shadow-sm flex items-center gap-1">
-                <i class="fa-solid fa-check"></i> Hoàn thành đơn
-              </button>
-            ` : ''}
-
-            ${order.status === 'shipping' ? `
-              <button onclick="updateOrderStatus('${order.id}', 'completed')" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3.5 py-1.5 rounded-lg transition shadow-sm flex items-center gap-1">
-                <i class="fa-solid fa-check"></i> Đã giao thành công
-              </button>
-            ` : ''}
-
-            ${order.status === 'completed' ? `
-              <div class="flex items-center gap-2">
-                <span class="text-xs text-emerald-700 font-bold bg-emerald-100 px-3 py-1 rounded-full flex items-center gap-1">
-                  <i class="fa-solid fa-circle-check"></i> Đơn đã hoàn tất
-                </span>
-                <button onclick="updateOrderStatus('${order.id}', 'preparing')" class="text-[11px] text-slate-400 hover:text-slate-600 underline" title="Chuyển lại về đang làm nếu bấm nhầm">
-                  Làm lại
-                </button>
-              </div>
-            ` : ''}
-
-            ${order.status === 'cancelled' ? `
-              <span class="text-xs text-rose-600 font-bold bg-rose-50 px-3 py-1 rounded-full flex items-center gap-1 border border-rose-200">
-                <i class="fa-solid fa-ban"></i> Đơn đã hủy
-              </span>
-            ` : ''}
-          </div>
-        </div>
-      </div>
-    `;
-  }).join('');
+  container.innerHTML = list.map(order => renderSingleAdminOrderCard(order)).join('');
 }
 
 function getOrderStatusBadge(status) {
@@ -1420,7 +1727,18 @@ function getOrderStatusBadge(status) {
     case 'cancelled':
       return { text: 'Đã hủy', badgeClass: 'bg-rose-100 text-rose-800 border border-rose-300' };
     default:
-      return { text: 'Mới tạo', badgeClass: 'bg-slate-100 text-slate-800 border border-slate-300' };
+      return { text: 'Chờ xác nhận', badgeClass: 'bg-amber-100 text-amber-800 border border-amber-300' };
+  }
+}
+
+function getPaymentStatusBadge(paymentStatus) {
+  switch (paymentStatus) {
+    case 'paid':
+      return { text: '💳 Đã TT tự động (VietQR)', badgeClass: 'bg-emerald-100 text-emerald-800 border border-emerald-300' };
+    case 'paid_reported':
+      return { text: '📲 Khách báo đã CK QR', badgeClass: 'bg-sky-100 text-sky-800 border border-sky-300' };
+    default:
+      return { text: '⏳ Chờ thanh toán', badgeClass: 'bg-slate-100 text-slate-600 border border-slate-200' };
   }
 }
 
@@ -1434,31 +1752,42 @@ function getOrderTypeName(type) {
 }
 
 async function updateOrderStatus(orderId, newStatus) {
-  try {
-    await fetch(`${API_URL}?action=update_order_status`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ orderId, status: newStatus })
-    });
-  } catch (e) {}
-
   const order = state.orders.find(o => o.id === orderId);
   if (order) {
     order.status = newStatus;
     if (newStatus === 'completed') {
       order.completedAt = new Date().toISOString();
+      order.paymentStatus = 'paid';
     }
     localStorage.setItem('the30_orders', JSON.stringify(state.orders));
   }
 
-  // Cập nhật số đếm badge, thông báo & vẽ lại danh sách
-  updateAdminHeaderOrdersCount();
-  renderAdminOrders();
+  try {
+    await fetch(`${API_URL}?action=update_order_status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orderId,
+        status: newStatus,
+        paymentStatus: newStatus === 'completed' ? 'paid' : undefined
+      })
+    });
+  } catch (e) {}
+
+  // Nếu Admin đang đứng ở tab "Chờ nhận" (pending) hoặc "Tất cả" (all) mà bấm Hoàn thành -> tự động đưa về bộ lọc Cần làm (active) để đơn hoàn thành rút ngay sang mục "Đã hoàn thành"
+  if (newStatus === 'completed' && state.activeOrderFilter === 'all') {
+    state.activeOrderFilter = 'active';
+    setOrderFilter('active');
+  } else {
+    updateAdminHeaderOrdersCount();
+    renderAdminOrders();
+  }
+  renderCustomerOrderTracker();
 
   if (newStatus === 'completed') {
-    showToast(`✅ Đơn hàng ${orderId} đã hoàn tất và tự động chuyển sang mục "Đã hoàn thành"!`);
+    showToast(`✅ Đơn ${orderId} đã hoàn tất và chuyển sang mục "Đã hoàn thành"!`);
   } else if (newStatus === 'preparing') {
-    showToast(`☕ Đã nhận đơn ${orderId} - Bắt đầu pha chế!`);
+    showToast(`☕ Đã nhận đơn ${orderId} - Đang pha chế!`);
   } else if (newStatus === 'shipping') {
     showToast(`🚚 Đơn hàng ${orderId} đang được giao đi!`);
   } else if (newStatus === 'cancelled') {
@@ -1466,6 +1795,25 @@ async function updateOrderStatus(orderId, newStatus) {
   } else {
     showToast(`Cập nhật đơn hàng ${orderId} thành công!`);
   }
+}
+
+async function deleteOrder(orderId) {
+  if (!confirm(`Bạn có chắc chắn muốn xóa đơn hàng ${orderId}?`)) return;
+  state.orders = state.orders.filter(o => o.id !== orderId);
+  localStorage.setItem('the30_orders', JSON.stringify(state.orders));
+
+  try {
+    await fetch(`${API_URL}?action=delete_order`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orderId })
+    });
+  } catch (e) {}
+
+  updateAdminHeaderOrdersCount();
+  renderAdminOrders();
+  renderCustomerOrderTracker();
+  showToast(`Đã xóa đơn hàng ${orderId}.`);
 }
 
 // 2. Quản lý Món (Thêm / Sửa / Xóa)
@@ -1826,11 +2174,12 @@ async function handleSaveSettings(e) {
   e.preventDefault();
   state.settings.storeName = document.getElementById('settingStoreName').value.trim();
   state.settings.hotline = document.getElementById('settingHotline').value.trim();
-  state.settings.bankCode = document.getElementById('settingBankCode').value.trim();
-  state.settings.bankAccount = document.getElementById('settingBankAccount').value.trim();
-  state.settings.bankAccountName = document.getElementById('settingBankAccountName').value.trim();
+  state.settings.bankCode = document.getElementById('settingBankCode').value.trim() || 'ICB';
+  state.settings.bankAccount = document.getElementById('settingBankAccount').value.trim() || '100880871374';
+  state.settings.bankAccountName = document.getElementById('settingBankAccountName').value.trim() || 'THE30s_COFFEE';
   state.settings.qrImageUrl = document.getElementById('settingQrImageUrl').value.trim();
-  state.settings.adminPin = document.getElementById('settingAdminPin').value.trim();
+  state.settings.adminPin = document.getElementById('settingAdminPin').value.trim() || '123456';
+  state.settings.settingsVersion = SETTINGS_SCHEMA_VERSION;
 
   try {
     await fetch(`${API_URL}?action=save_settings`, {

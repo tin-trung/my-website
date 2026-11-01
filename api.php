@@ -147,7 +147,8 @@ function getInitialSettings() {
         'bankAccount' => '100880871374',
         'bankAccountName' => 'THE30s_COFFEE',
         'qrImageUrl' => '', // Quản lý có thể tải ảnh QR của quán lên
-        'orderPrefix' => 'THE30S'
+        'orderPrefix' => 'THE30S',
+        'settingsVersion' => '20261101_v5'
     ];
 }
 
@@ -173,6 +174,14 @@ switch ($action) {
         $products = readFileJson($productsFile, getInitialProducts());
         $banners  = readFileJson($bannersFile, getInitialBanners());
         $settings = readFileJson($settingsFile, getInitialSettings());
+        if (empty($settings['bankAccount']) || $settings['bankAccount'] === '0949551441' || (isset($settings['bankCode']) && $settings['bankCode'] === 'MB') || empty($settings['settingsVersion']) || $settings['settingsVersion'] !== '20261101_v5') {
+            $settings['bankCode'] = 'ICB';
+            $settings['bankAccount'] = '100880871374';
+            $settings['bankAccountName'] = 'THE30s_COFFEE';
+            $settings['qrImageUrl'] = '';
+            $settings['settingsVersion'] = '20261101_v5';
+            writeFileJson($settingsFile, $settings);
+        }
         $orders   = readFileJson($ordersFile, []);
         
         echo json_encode([
@@ -202,7 +211,7 @@ switch ($action) {
             'items'         => $input['items'], // [{id, name, price, quantity, note}]
             'totalAmount'   => intval($input['totalAmount']),
             'status'        => 'pending', // pending, preparing, shipping, completed, cancelled
-            'paymentStatus' => 'unpaid',  // unpaid, paid
+            'paymentStatus' => 'unpaid',  // unpaid, paid, paid_reported
             'createdAt'     => date('Y-m-d H:i:s'),
             'timestamp'     => time()
         ];
@@ -213,6 +222,7 @@ switch ($action) {
         break;
 
     case 'check_payment_status':
+    case 'check_order_payment':
         $orderId = isset($_GET['orderId']) ? trim($_GET['orderId']) : '';
         $orders = readFileJson($ordersFile, []);
         $cleanSearch = str_replace('-', '', strtoupper($orderId));
@@ -227,9 +237,11 @@ switch ($action) {
         }
 
         if ($foundOrder) {
+            $isPaid = ($foundOrder['paymentStatus'] === 'paid');
             echo json_encode([
                 'success' => true,
-                'paid' => ($foundOrder['paymentStatus'] === 'paid'),
+                'paid' => $isPaid,
+                'isPaid' => $isPaid,
                 'paymentStatus' => isset($foundOrder['paymentStatus']) ? $foundOrder['paymentStatus'] : 'unpaid',
                 'status' => $foundOrder['status'],
                 'order' => $foundOrder
@@ -238,6 +250,7 @@ switch ($action) {
             echo json_encode([
                 'success' => false,
                 'paid' => false,
+                'isPaid' => false,
                 'message' => 'Không tìm thấy đơn hàng'
             ], JSON_UNESCAPED_UNICODE);
         }
@@ -247,12 +260,21 @@ switch ($action) {
         $input = json_decode(file_get_contents('php://input'), true);
         $orderId = isset($input['orderId']) ? $input['orderId'] : '';
         $newStatus = isset($input['status']) ? $input['status'] : '';
+        $paymentStatus = isset($input['paymentStatus']) ? $input['paymentStatus'] : '';
         
         $orders = readFileJson($ordersFile, []);
         $found = false;
         foreach ($orders as &$ord) {
             if ($ord['id'] === $orderId) {
-                $ord['status'] = $newStatus;
+                if (!empty($newStatus)) {
+                    $ord['status'] = $newStatus;
+                    if ($newStatus === 'completed') {
+                        $ord['completedAt'] = date('Y-m-d H:i:s');
+                    }
+                }
+                if (!empty($paymentStatus)) {
+                    $ord['paymentStatus'] = $paymentStatus;
+                }
                 $found = true;
                 break;
             }
@@ -263,6 +285,17 @@ switch ($action) {
         } else {
             echo json_encode(['success' => false, 'message' => 'Không tìm thấy đơn hàng']);
         }
+        break;
+
+    case 'delete_order':
+        $input = json_decode(file_get_contents('php://input'), true);
+        $orderId = isset($input['orderId']) ? $input['orderId'] : '';
+        $orders = readFileJson($ordersFile, []);
+        $orders = array_values(array_filter($orders, function($o) use ($orderId) {
+            return $o['id'] !== $orderId;
+        }));
+        writeFileJson($ordersFile, $orders);
+        echo json_encode(['success' => true, 'orders' => $orders], JSON_UNESCAPED_UNICODE);
         break;
 
     case 'save_product':
