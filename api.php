@@ -143,9 +143,9 @@ function getInitialSettings() {
         'hotline' => '0949551441 - 0949789483',
         'address' => 'Việt Nam (Đặt giao nhanh tận nơi / Mang đi / Tại bàn)',
         'adminPin' => '123456',
-        'bankCode' => 'MB',
-        'bankAccount' => '0949551441',
-        'bankAccountName' => 'THE 30 COFFEE AND TEA',
+        'bankCode' => 'ICB',
+        'bankAccount' => '100880871374',
+        'bankAccountName' => 'THE30s_COFFEE',
         'qrImageUrl' => '', // Quản lý có thể tải ảnh QR của quán lên
         'orderPrefix' => 'THE30S'
     ];

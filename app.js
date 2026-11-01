@@ -113,9 +113,9 @@ const DEFAULT_SETTINGS = {
   hotline: '0949551441 - 0949789483',
   address: 'Giao nhanh tận nơi / Uống tại quán / Mang đi',
   adminPin: '123456',
-  bankCode: 'MB',
-  bankAccount: '0949551441',
-  bankAccountName: 'THE 30 COFFEE AND TEA',
+  bankCode: 'ICB',
+  bankAccount: '100880871374',
+  bankAccountName: 'THE30s_COFFEE',
   qrImageUrl: '',
   orderPrefix: 'THE30S'
 };
@@ -270,7 +270,14 @@ async function loadData() {
 
   state.products = cachedProducts ? JSON.parse(cachedProducts) : DEFAULT_PRODUCTS;
   state.banners  = cachedBanners  ? JSON.parse(cachedBanners)  : DEFAULT_BANNERS;
-  state.settings = cachedSettings ? JSON.parse(cachedSettings) : DEFAULT_SETTINGS;
+  
+  let loadedSettings = cachedSettings ? JSON.parse(cachedSettings) : DEFAULT_SETTINGS;
+  // Tự động nâng cấp tài khoản Vietinbank chính thức nếu đang dính số demo cũ
+  if (!loadedSettings.bankAccount || loadedSettings.bankAccount === '0949551441') {
+    loadedSettings = { ...loadedSettings, ...DEFAULT_SETTINGS };
+    localStorage.setItem('the30_settings', JSON.stringify(loadedSettings));
+  }
+  state.settings = loadedSettings;
   state.orders   = cachedOrders   ? JSON.parse(cachedOrders)   : [];
 }
 
@@ -887,9 +894,9 @@ function openQrModal(order) {
 
   orderIdEl.textContent = order.id;
   amountEl.textContent = formatPrice(order.totalAmount);
-  bankEl.textContent = state.settings.bankCode || 'MB';
-  accountEl.textContent = state.settings.bankAccount || '0949551441';
-  accountNameEl.textContent = state.settings.bankAccountName || 'THE 30 COFFEE';
+  bankEl.textContent = (state.settings.bankCode === 'ICB' ? 'VietinBank (ICB)' : (state.settings.bankCode || 'VietinBank'));
+  accountEl.textContent = state.settings.bankAccount || '100880871374';
+  accountNameEl.textContent = state.settings.bankAccountName || 'THE30s_COFFEE';
   
   // Cú pháp chuyển khoản chuẩn: THE30 [Mã_Đơn]
   const transferContent = `THE30 ${order.id}`;
@@ -900,9 +907,9 @@ function openQrModal(order) {
     qrImg.src = state.settings.qrImageUrl;
   } else {
     // Tự động sinh VietQR chuẩn ngân hàng Napas 24/7 theo số tiền và nội dung
-    const bank = encodeURIComponent(state.settings.bankCode || 'MB');
-    const acc = encodeURIComponent(state.settings.bankAccount || '0949551441');
-    const name = encodeURIComponent(state.settings.bankAccountName || 'THE 30 COFFEE AND TEA');
+    const bank = encodeURIComponent(state.settings.bankCode || 'ICB');
+    const acc = encodeURIComponent(state.settings.bankAccount || '100880871374');
+    const name = encodeURIComponent(state.settings.bankAccountName || 'THE30s_COFFEE');
     const vietQrUrl = `https://img.vietqr.io/image/${bank}-${acc}-compact2.jpg?amount=${order.totalAmount}&addInfo=${encodeURIComponent(transferContent)}&accountName=${name}`;
     qrImg.src = vietQrUrl;
   }
@@ -1808,9 +1815,9 @@ async function deleteBanner(bannerId) {
 function populateSettingsForm() {
   document.getElementById('settingStoreName').value = state.settings.storeName || 'The 30 - Coffee & Tea';
   document.getElementById('settingHotline').value = state.settings.hotline || '0949551441 - 0949789483';
-  document.getElementById('settingBankCode').value = state.settings.bankCode || 'MB';
-  document.getElementById('settingBankAccount').value = state.settings.bankAccount || '0949551441';
-  document.getElementById('settingBankAccountName').value = state.settings.bankAccountName || 'THE 30 COFFEE AND TEA';
+  document.getElementById('settingBankCode').value = state.settings.bankCode || 'ICB';
+  document.getElementById('settingBankAccount').value = state.settings.bankAccount || '100880871374';
+  document.getElementById('settingBankAccountName').value = state.settings.bankAccountName || 'THE30s_COFFEE';
   document.getElementById('settingQrImageUrl').value = state.settings.qrImageUrl || '';
   document.getElementById('settingAdminPin').value = state.settings.adminPin || '123456';
 }
