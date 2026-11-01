@@ -178,11 +178,6 @@
   <!-- 1. GIAO DIỆN KHÁCH HÀNG (CUSTOMER VIEW)                   -->
   <!-- ======================================================== -->
   <main id="customerView" class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-4 sm:py-6 space-y-8">
-    
-    <!-- KHUNG THEO DÕI ĐƠN HÀNG CỦA RIÊNG KHÁCH HÀNG (Chỉ hiện khi chính khách này vừa đặt đơn) -->
-    <section id="customerOrderTracker" class="hidden">
-      <!-- Rendered dynamically by JS for the customer's own active order -->
-    </section>
 
     <!-- 1. BANNER QUẢNG CÁO CAROUSEL -->
     <section class="relative overflow-hidden rounded-2xl shadow-xl border border-slate-200/80 bg-brand-950">
@@ -647,7 +642,7 @@
     </div>
   </div>
 
-  <!-- 3. DRAWER GIỎ HÀNG & CHÚ THÍCH MÓN -->
+  <!-- 3. DRAWER GIỎ HÀNG & THEO DÕI ĐƠN HÀNG ĐÃ MUA -->
   <div id="cartDrawer" class="hidden fixed inset-0 z-50 overflow-hidden">
     <!-- Backdrop -->
     <div onclick="closeCartDrawer()" class="absolute inset-0 bg-black/50 backdrop-blur-sm transition-opacity"></div>
@@ -655,56 +650,102 @@
     <div class="fixed inset-y-0 right-0 max-w-full flex pl-10">
       <div class="w-screen max-w-md bg-white shadow-2xl flex flex-col">
         <!-- Drawer Header -->
-        <div class="p-4 sm:p-5 bg-brand-900 text-white flex items-center justify-between">
+        <div class="p-4 sm:p-5 bg-brand-900 text-white flex items-center justify-between flex-shrink-0">
           <div class="flex items-center gap-2.5">
             <i class="fa-solid fa-bag-shopping text-amber-300 text-lg"></i>
-            <h3 class="font-extrabold text-base">Giỏ Hàng Của Bạn</h3>
+            <div>
+              <h3 class="font-extrabold text-base leading-tight">Giỏ Hàng & Đơn Đã Đặt</h3>
+              <p class="text-[11px] text-amber-200/90">Chọn món đặt mới & theo dõi tiến độ đơn hàng</p>
+            </div>
           </div>
           <button onclick="closeCartDrawer()" class="text-white/80 hover:text-white w-8 h-8 rounded-full flex items-center justify-center hover:bg-white/10 transition">
             <i class="fa-solid fa-xmark text-lg"></i>
           </button>
         </div>
 
-        <!-- Cart Items List (Có ô chú thích cho từng món) -->
-        <div id="cartItemsContainer" class="flex-1 overflow-y-auto p-4 sm:p-5 space-y-3.5 divide-y divide-slate-100">
-          <!-- Rendered by JS -->
-        </div>
+        <!-- Nội dung cuộn chung: Giỏ hàng hiện tại + Form Thanh toán + Danh sách Đơn hàng đã mua -->
+        <div id="cartDrawerScrollBody" class="flex-1 overflow-y-auto divide-y divide-slate-200">
+          <!-- PHẦN A: MÓN ĐANG CHỌN TRONG GIỎ HÀNG -->
+          <div class="p-4 sm:p-5 space-y-4">
+            <div class="flex items-center justify-between">
+              <h4 class="text-xs font-extrabold uppercase tracking-wider text-brand-900 flex items-center gap-1.5">
+                <i class="fa-solid fa-cart-plus text-amber-600"></i>
+                <span>Món Đang Chọn Đặt</span>
+              </h4>
+              <span id="cartCurrentItemsBadge" class="text-[11px] font-bold bg-brand-50 text-brand-900 px-2 py-0.5 rounded-full border border-brand-200">0 món</span>
+            </div>
 
-        <!-- Cart Footer & Checkout Info -->
-        <div class="border-t border-slate-200 p-4 sm:p-5 bg-slate-50 space-y-3">
-          <!-- Hình thức nhận món -->
-          <div>
-            <label class="block text-xs font-bold text-slate-700 mb-1">Hình thức nhận món:</label>
-            <div class="grid grid-cols-3 gap-1.5 text-xs font-semibold">
-              <button type="button" onclick="selectOrderType('takeaway')" id="btnOrderType-takeaway" class="order-type-btn py-1.5 px-2 rounded-lg border border-brand-900 bg-brand-900 text-white text-center">
-                Mang đi
-              </button>
-              <button type="button" onclick="selectOrderType('dinein')" id="btnOrderType-dinein" class="order-type-btn py-1.5 px-2 rounded-lg border border-slate-200 bg-white text-slate-700 text-center">
-                Tại bàn
-              </button>
-              <button type="button" onclick="selectOrderType('delivery')" id="btnOrderType-delivery" class="order-type-btn py-1.5 px-2 rounded-lg border border-slate-200 bg-white text-slate-700 text-center">
-                Giao tận nơi
+            <!-- Cart Items List (Có ô chú thích cho từng món) -->
+            <div id="cartItemsContainer" class="space-y-3.5 divide-y divide-slate-100">
+              <!-- Rendered by JS -->
+            </div>
+
+            <!-- Khung cấu hình Đặt hàng & Thanh toán (Hiện khi có món trong giỏ) -->
+            <div id="cartCheckoutSection" class="pt-3 border-t border-slate-200 bg-slate-50 -mx-4 sm:-mx-5 px-4 sm:px-5 py-4 space-y-3">
+              <!-- Hình thức nhận món -->
+              <div>
+                <label class="block text-xs font-bold text-slate-700 mb-1.5">1. Hình thức nhận món:</label>
+                <div class="grid grid-cols-3 gap-1.5 text-xs font-semibold">
+                  <button type="button" onclick="selectOrderType('takeaway')" id="btnOrderType-takeaway" class="order-type-btn py-2 px-2 rounded-lg border border-brand-900 bg-brand-900 text-white text-center transition">
+                    <i class="fa-solid fa-bag-shopping mr-1"></i>Mang đi
+                  </button>
+                  <button type="button" onclick="selectOrderType('dinein')" id="btnOrderType-dinein" class="order-type-btn py-2 px-2 rounded-lg border border-slate-200 bg-white text-slate-700 text-center transition">
+                    <i class="fa-solid fa-chair mr-1"></i>Tại bàn
+                  </button>
+                  <button type="button" onclick="selectOrderType('delivery')" id="btnOrderType-delivery" class="order-type-btn py-2 px-2 rounded-lg border border-slate-200 bg-white text-slate-700 text-center transition">
+                    <i class="fa-solid fa-motorcycle mr-1"></i>Giao tận nơi
+                  </button>
+                </div>
+              </div>
+
+              <!-- Chi tiết địa chỉ / số bàn -->
+              <div id="orderLocationInputWrapper">
+                <label id="orderLocationLabel" class="block text-xs font-bold text-slate-700 mb-1">Ghi chú cho quán (Mang đi):</label>
+                <input type="text" id="orderLocationInput" placeholder="Ví dụ: Lấy thêm ống hút, ly giấy..." class="w-full text-xs p-2.5 bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-brand-500">
+              </div>
+
+              <!-- Phương thức thanh toán (Chuyển khoản QR hoặc Tiền mặt) -->
+              <div>
+                <label class="block text-xs font-bold text-slate-700 mb-1.5">2. Phương thức thanh toán:</label>
+                <div class="grid grid-cols-2 gap-2 text-xs font-bold">
+                  <button type="button" onclick="selectPaymentMethod('qr')" id="btnPaymentMethod-qr" class="payment-method-btn py-2.5 px-3 rounded-xl border-2 border-brand-900 bg-brand-900 text-white flex items-center justify-center gap-1.5 shadow-sm transition">
+                    <i class="fa-solid fa-qrcode text-amber-300"></i>
+                    <span>Chuyển khoản QR</span>
+                  </button>
+                  <button type="button" onclick="selectPaymentMethod('cash')" id="btnPaymentMethod-cash" class="payment-method-btn py-2.5 px-3 rounded-xl border-2 border-slate-200 bg-white text-slate-700 flex items-center justify-center gap-1.5 transition">
+                    <i class="fa-solid fa-money-bill-wave text-emerald-600"></i>
+                    <span>Tiền mặt</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Tổng tiền -->
+              <div class="flex items-center justify-between pt-2 border-t border-slate-200">
+                <span class="text-sm font-semibold text-slate-600">Tổng thanh toán:</span>
+                <span id="cartTotalPrice" class="text-lg font-black text-brand-900">0 đ</span>
+              </div>
+
+              <!-- Nút Đặt hàng -->
+              <button id="btnProceedOrderSubmit" onclick="handleProceedToOrder()" class="w-full bg-brand-900 hover:bg-brand-800 text-white font-extrabold py-3 rounded-xl shadow-lg transition active:scale-98 flex items-center justify-center gap-2">
+                <span id="btnProceedOrderText">Đặt hàng & Quét mã QR</span>
+                <i class="fa-solid fa-arrow-right text-amber-300"></i>
               </button>
             </div>
           </div>
 
-          <!-- Chi tiết địa chỉ / số bàn -->
-          <div id="orderLocationInputWrapper">
-            <label id="orderLocationLabel" class="block text-xs font-bold text-slate-700 mb-1">Ghi chú thêm:</label>
-            <input type="text" id="orderLocationInput" placeholder="Ví dụ: Lấy thêm ống hút, ly giấy..." class="w-full text-xs p-2 bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-brand-500">
+          <!-- PHẦN B: DANH SÁCH ĐƠN HÀNG ĐÃ MUA & THEO DÕI TRẠNG THÁI TRỰC TIẾP -->
+          <div id="cartOrderHistorySection" class="p-4 sm:p-5 bg-slate-50/70 space-y-3">
+            <div class="flex items-center justify-between">
+              <h4 class="text-xs font-extrabold uppercase tracking-wider text-brand-900 flex items-center gap-1.5">
+                <i class="fa-solid fa-clock-rotate-left text-brand-700"></i>
+                <span>Đơn Hàng Đã Đặt & Trạng Thái</span>
+              </h4>
+              <span id="cartHistoryCountBadge" class="text-[11px] font-bold bg-amber-100 text-amber-900 px-2 py-0.5 rounded-full">0 đơn</span>
+            </div>
+            <div id="cartOrderHistoryList" class="space-y-3">
+              <!-- Rendered dynamically by JS: đẩy theo list các đơn hàng đã mua -->
+            </div>
           </div>
-
-          <!-- Tổng tiền -->
-          <div class="flex items-center justify-between pt-2 border-t border-slate-200">
-            <span class="text-sm font-semibold text-slate-600">Tổng thanh toán:</span>
-            <span id="cartTotalPrice" class="text-lg font-black text-brand-900">0 đ</span>
-          </div>
-
-          <!-- Nút Đặt hàng -->
-          <button onclick="handleProceedToOrder()" class="w-full bg-brand-900 hover:bg-brand-800 text-white font-extrabold py-3 rounded-xl shadow-lg transition active:scale-98 flex items-center justify-center gap-2">
-            <span>Đặt hàng & Quét mã QR</span>
-            <i class="fa-solid fa-arrow-right text-amber-300"></i>
-          </button>
         </div>
       </div>
     </div>
@@ -726,7 +767,7 @@
           </div>
           <h3 class="text-lg font-black text-brand-900">Quét Mã QR Chuyển Khoản</h3>
           <p class="text-xs text-slate-500">
-            Hệ thống tự động kiểm tra mỗi 3 giây và nhận đơn ngay khi chuyển thành công
+            Khi ngân hàng nhận được tiền, mã QR sẽ tự động báo Tick Xanh thành công và đóng lại
           </p>
         </div>
 
@@ -784,45 +825,30 @@
         </div>
 
         <div class="space-y-2 pt-1">
-          <button onclick="confirmCustomerTransfer()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold py-2.5 rounded-xl text-xs sm:text-sm shadow-md transition flex items-center justify-center gap-2">
-            <i class="fa-solid fa-circle-check"></i>
-            <span>Tôi đã chuyển khoản hoàn tất</span>
-          </button>
-          <button onclick="checkPaymentManual()" class="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-2 rounded-xl text-xs transition flex items-center justify-center gap-1.5">
+          <button onclick="checkPaymentManual()" class="w-full bg-brand-900 hover:bg-brand-800 text-white font-bold py-2.5 rounded-xl text-xs sm:text-sm shadow transition flex items-center justify-center gap-1.5">
             <i class="fa-solid fa-arrows-rotate text-xs"></i>
-            <span>Kiểm tra tự động với ngân hàng</span>
+            <span>Kiểm tra giao dịch ngân hàng ngay</span>
           </button>
           <button onclick="closeQrModal()" class="w-full text-slate-400 hover:text-slate-600 text-xs py-1 transition">
-            Đóng cửa sổ (Xem trạng thái đơn)
+            Đóng tạm cửa sổ QR
           </button>
         </div>
       </div>
 
-      <!-- GIAO DIỆN KHI THANH TOÁN THÀNH CÔNG (TỰ ĐỘNG HIỆN) -->
-      <div id="qrSuccessContainer" class="hidden text-center py-6 space-y-4 animate-in zoom-in duration-300">
-        <div class="w-20 h-20 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center text-4xl mx-auto shadow-lg shadow-emerald-100">
-          <i class="fa-solid fa-circle-check"></i>
+      <!-- GIAO DIỆN TICK XANH KHI THANH TOÁN THÀNH CÔNG (TỰ ĐỘNG HIỆN VÀ TỰ ĐỘNG TẮT) -->
+      <div id="qrSuccessContainer" class="hidden text-center py-8 space-y-4 animate-in zoom-in duration-300">
+        <div class="w-24 h-24 rounded-full bg-emerald-500 text-white flex items-center justify-center text-5xl mx-auto shadow-xl shadow-emerald-200 animate-bounce">
+          <i class="fa-solid fa-check"></i>
         </div>
-        <div class="space-y-1">
-          <span class="text-xs font-bold text-emerald-700 uppercase tracking-wider">Ting Ting! Thanh Toán Thành Công</span>
-          <h3 class="text-xl font-black text-slate-900">Quán Đã Nhận Được Đơn Hàng!</h3>
+        <div class="space-y-1.5">
+          <span class="inline-block bg-emerald-100 text-emerald-800 text-xs font-extrabold px-3 py-1 rounded-full uppercase tracking-wider">
+            ✓ Đã Thanh Toán Thành Công
+          </span>
+          <h3 class="text-xl font-black text-slate-900">Ngân Hàng Đã Nhận Được Tiền!</h3>
           <p class="text-xs text-slate-500 max-w-xs mx-auto">
-            Hệ thống đã tự động xác nhận số tiền. Quầy pha chế The 30 đang chuẩn bị món ngay cho bạn!
+            Đơn hàng <span id="qrSuccessOrderId" class="font-mono font-bold text-brand-900">-</span> đã được chuyển vào mục Giỏ hàng & Đơn đã đặt. Cửa sổ sẽ tự động đóng...
           </p>
         </div>
-        <div class="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-left max-w-xs mx-auto space-y-1">
-          <div class="flex justify-between">
-            <span class="text-slate-500">Mã đơn:</span>
-            <span id="qrSuccessOrderId" class="font-mono font-bold text-brand-900">-</span>
-          </div>
-          <div class="flex justify-between">
-            <span class="text-slate-500">Trạng thái:</span>
-            <span class="font-bold text-emerald-600">Đang pha chế</span>
-          </div>
-        </div>
-        <button onclick="closeQrModal()" class="bg-brand-900 hover:bg-brand-800 text-white font-bold text-xs px-6 py-2.5 rounded-xl shadow-md transition">
-          Hoàn tất & Tiếp tục đặt món
-        </button>
       </div>
     </div>
   </div>
@@ -1019,6 +1045,6 @@
   </footer>
 
   <!-- Script ứng dụng (kèm version chống cache trình duyệt) -->
-  <script src="app.js?v=20261101_v9"></script>
+  <script src="app.js?v=20261101_v10"></script>
 </body>
 </html>
