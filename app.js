@@ -149,6 +149,247 @@ let state = {
 
 // URL API Backend PHP
 const API_URL = 'api.php';
+let isPhpBackendAvailable = null; // Tự động phát hiện khi chạy trực tiếp trên GitHub Pages
+
+// --- CẤU HÌNH KẾT NỐI TRỰC TIẾP APIPAY (CHẠY NGAY TRÊN GITHUB PAGES) ---
+const APIPAY_LIVE_CONFIG = {
+  baseUrl: 'https://app.apipay.vn/v1',
+  accessKey: '89c1dddbdf3378cbf20e319b3f6111847a7c251f173900f9866a5a791ac3260c',
+  secretKey: '59h4pFKdXKV5AFam3nikR0OYVX/ewcOzkuxIm9ZPLnBZUN2uzEM0F4KzPT15NtkPslLHhTubfyfGtB3m+XDvQA==',
+  bankPublicId: 'cmvxjzmx504zt01mtsg7gr1by',
+  ignoredPublicIds: ['APIPAYJSCBNE1DC0WJU', 'APIPAYJSCJNYBNGA97U']
+};
+
+function getApiPayBearerToken() {
+  return btoa(`${APIPAY_LIVE_CONFIG.accessKey}:${APIPAY_LIVE_CONFIG.secretKey}`);
+}
+
+function getOrderTransferContent(orderId) {
+  const cleanCode = String(orderId || '').replace(/[^A-Z0-9]/gi, '').toUpperCase();
+  return `THE30 ${cleanCode}`;
+}
+
+async function callApiPayDirect(endpointPath, method = 'GET', bodyObj = null) {
+  const targetUrl = `${APIPAY_LIVE_CONFIG.baseUrl}${endpointPath}`;
+  const proxyUrl = `https://proxy.corsfix.com/?sdk=1&url=${encodeURIComponent(targetUrl)}`;
+
+  const headers = {
+    'Authorization': `Bearer ${getApiPayBearerToken()}`,
+    'x-corsfix-headers': JSON.stringify({ origin: 'https://pay.apipay.vn' })
+  };
+  if (bodyObj) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  try {
+    const res = await fetch(proxyUrl, {
+      method,
+      headers,
+      body: bodyObj ? JSON.stringify(bodyObj) : undefined
+    });
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch (err) {
+    // Fallback sang cổng dự phòng AllOrigins nếu là GET công khai
+  }
+
+  if (method === 'GET' && endpointPath.startsWith('/payment-requests/')) {
+    try {
+      const sep = targetUrl.includes('?') ? '&' : '?';
+      const fallbackUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl + sep + '_t=' + Date.now())}`;
+      const res2 = await fetch(fallbackUrl);
+      if (res2.ok) {
+        const wrapper = await res2.json();
+        if (wrapper && wrapper.contents) {
+          return JSON.parse(wrapper.contents);
+        }
+      }
+    } catch (e2) {}
+  }
+
+  return null;
+}
+
+async function createApiPayPaymentDirect(orderData) {
+  if (!orderData || !orderData.id) return null;
+  if (orderData.apipayPublicId && orderData.apipayQrUrl) {
+    return {
+      publicId: orderData.apipayPublicId,
+      qrUrl: orderData.apipayQrUrl,
+      payUrl: orderData.apipayPayUrl
+    };
+  }
+
+  const transferContent = getOrderTransferContent(orderData.id);
+  const typeText = orderData.orderType === 'dinein'
+    ? `Ban: ${orderData.address || ''}`
+    : orderData.orderType === 'delivery'
+      ? `Giao: ${orderData.address || ''}`
+      : `Mang di${orderData.address ? ': ' + orderData.address : ''}`;
+  const itemsSummary = (orderData.items || [])
+    .map(i => `${i.quantity}x ${i.name}${i.note ? ' (' + i.note + ')' : ''}`)
+    .join(', ');
+  const compactTitle = `${orderData.id} | ${orderData.customerName || 'Khach'} (${orderData.customerPhone || ''}) | ${typeText} | ${itemsSummary}`.slice(0, 240);
+
+  const payload = {
+    bankPublicId: APIPAY_LIVE_CONFIG.bankPublicId,
+    amount: String(Math.max(1000, Math.round(Number(orderData.totalAmount) || 0))),
+    content: transferContent,
+    title: compactTitle
+  };
+
+  const result = await callApiPayDirect('/client/payment-requests', 'POST', payload);
+  if (result && result.data && result.data.publicId) {
+    const d = result.data;
+    orderData.apipayPublicId = d.publicId;
+    orderData.apipayQrUrl = d.qrUrl || `${APIPAY_LIVE_CONFIG.baseUrl}/payment-requests/${d.publicId}/qr-image`;
+    orderData.apipayPayUrl = d.payUrl || `https://pay.apipay.vn/${d.publicId}`;
+    orderData.transferContent = d.content || transferContent;
+    localStorage.setItem('the30_orders', JSON.stringify(state.orders));
+    return {
+      publicId: orderData.apipayPublicId,
+      qrUrl: orderData.apipayQrUrl,
+      payUrl: orderData.apipayPayUrl
+    };
+  }
+  return null;
+}
+
+function isApiPayStatusPaid(statusVal) {
+  if (!statusVal) return false;
+  const st = String(statusVal).toUpperCase();
+  return ['COMPLETED', 'PAID', 'SUCCESS', 'SUCCEEDED', 'DONE'].includes(st);
+}
+
+async function checkApiPayOrderDirect(orderId) {
+  const order = state.orders.find(o => o.id === orderId);
+  if (order && !order.apipayPublicId) {
+    await createApiPayPaymentDirect(order);
+  }
+
+  const apipayPid = order && order.apipayPublicId ? order.apipayPublicId : '';
+  const cleanOrderCode = String(orderId || '').replace(/[^A-Z0-9]/gi, '').toUpperCase();
+
+  // 1. Kiểm tra trực tiếp mã Payment Request của đơn hàng trên ApiPay
+  if (apipayPid) {
+    const res = await callApiPayDirect(`/payment-requests/${encodeURIComponent(apipayPid)}`, 'GET');
+    if (res && res.data) {
+      const pData = res.data;
+      if (isApiPayStatusPaid(pData.status) || pData.paidAt || pData.completedAt) {
+        return true;
+      }
+    }
+  }
+
+  // 2. Đối chiếu danh sách Payment Requests mới nhất trên tài khoản ApiPay
+  const listRes = await callApiPayDirect('/client/payment-requests?page=1&limit=20', 'GET');
+  if (listRes && listRes.data && Array.isArray(listRes.data.data)) {
+    for (const item of listRes.data.data) {
+      if (APIPAY_LIVE_CONFIG.ignoredPublicIds.includes(item.publicId)) continue;
+      const itemContentClean = String(item.content || '').replace(/[^A-Z0-9]/gi, '').toUpperCase();
+      const itemTitle = String(item.title || '');
+      const isMatch =
+        (apipayPid && item.publicId === apipayPid) ||
+        (orderId && itemTitle.includes(orderId)) ||
+        (cleanOrderCode && itemContentClean.includes(cleanOrderCode));
+
+      if (isMatch && isApiPayStatusPaid(item.status)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+async function syncOrdersFromApiPay() {
+  try {
+    // Nếu khách có đơn chưa thanh toán hoặc Admin đang mở trang quản lý, đồng bộ từ ApiPay
+    const hasUnpaidMyOrder = state.orders.some(
+      o => o.paymentStatus !== 'paid' && o.status !== 'cancelled' && o.status !== 'completed'
+    );
+    if (!state.isAdminLoggedIn && !hasUnpaidMyOrder) return;
+
+    const listRes = await callApiPayDirect('/client/payment-requests?page=1&limit=25', 'GET');
+    if (!listRes || !listRes.data || !Array.isArray(listRes.data.data)) return;
+
+    let changed = false;
+    const oldPending = state.orders.filter(o => o.status === 'pending').length;
+
+    for (const pr of listRes.data.data) {
+      if (!pr || !pr.publicId || APIPAY_LIVE_CONFIG.ignoredPublicIds.includes(pr.publicId)) continue;
+
+      const titleStr = String(pr.title || '');
+      const idMatch = titleStr.match(/^(ORD-[0-9]+)/i);
+      const extractedOrderId = idMatch ? idMatch[1].toUpperCase() : null;
+
+      let existing = state.orders.find(
+        o => o.apipayPublicId === pr.publicId || (extractedOrderId && o.id === extractedOrderId)
+      );
+
+      // Nếu Admin đang đăng nhập và có đơn mới từ máy khách khác gửi lên ApiPay
+      if (!existing && state.isAdminLoggedIn && extractedOrderId) {
+        const parts = titleStr.split(' | ');
+        const custPart = parts[1] || 'Khách hàng';
+        const locPart = parts[2] || 'Mang đi';
+        const itemsPart = parts[3] || 'Đơn hàng trên web';
+        const phoneMatch = custPart.match(/\(([0-9+]+)\)/);
+        const custPhone = phoneMatch ? phoneMatch[1] : '';
+        const custName = custPart.replace(/\s*\([0-9+]+\)/, '').trim() || 'Khách hàng';
+        const orderType = locPart.startsWith('Ban:') ? 'dinein' : locPart.startsWith('Giao:') ? 'delivery' : 'takeaway';
+        const addressVal = locPart.replace(/^(Ban:|Giao:|Mang di:?)\s*/i, '').trim();
+
+        existing = {
+          id: extractedOrderId,
+          customerPhone: custPhone,
+          customerName: custName,
+          orderType: orderType,
+          address: addressVal,
+          note: addressVal,
+          items: [{ id: 'apipay', name: itemsPart, price: Number(pr.amount) || 0, quantity: 1, note: '' }],
+          totalAmount: Number(pr.amount) || 0,
+          status: isApiPayStatusPaid(pr.status) ? 'preparing' : 'pending',
+          paymentStatus: isApiPayStatusPaid(pr.status) ? 'paid' : 'unpaid',
+          apipayPublicId: pr.publicId,
+          apipayQrUrl: pr.qrUrl || '',
+          apipayPayUrl: pr.payUrl || '',
+          createdAt: pr.createdAt || new Date().toISOString()
+        };
+        state.orders.unshift(existing);
+        changed = true;
+      }
+
+      if (existing && isApiPayStatusPaid(pr.status) && existing.paymentStatus !== 'paid') {
+        existing.paymentStatus = 'paid';
+        if (existing.status === 'pending') {
+          existing.status = 'preparing';
+        }
+        changed = true;
+        if (currentPollingOrderId === existing.id) {
+          onPaymentSuccess(existing.id, false);
+        } else {
+          playTingTingSound();
+          showToast(`Ting ting! Đơn hàng ${existing.id} đã thanh toán thành công!`);
+        }
+      }
+    }
+
+    if (changed) {
+      localStorage.setItem('the30_orders', JSON.stringify(state.orders));
+      const newPending = state.orders.filter(o => o.status === 'pending').length;
+      if (state.isAdminLoggedIn && newPending > oldPending) {
+        playNewOrderSound();
+        showToast(`🔔 Có ${newPending - oldPending} đơn hàng mới vừa được đặt!`);
+      }
+      renderCustomerOrderTracker();
+      updateAdminHeaderOrdersCount();
+      if (state.isAdminLoggedIn && state.activeAdminTab === 'orders') {
+        renderAdminOrders();
+      }
+    }
+  } catch (e) {}
+}
 
 // Hàm ép buộc nâng cấp tài khoản VietinBank chính thức nếu trình duyệt/server còn lưu số cũ
 function enforceOfficialBankSettings() {
@@ -278,31 +519,37 @@ async function initApp() {
 }
 
 async function loadData() {
-  try {
-    const res = await fetch(`${API_URL}?action=get_all`, { method: 'GET' });
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.success) {
-        state.products = data.products || DEFAULT_PRODUCTS;
-        state.banners  = data.banners  || DEFAULT_BANNERS;
-        state.settings = { ...DEFAULT_SETTINGS, ...(data.settings || {}) };
-        state.orders   = data.orders   || [];
-        
-        enforceOfficialBankSettings();
+  if (isPhpBackendAvailable !== false) {
+    try {
+      const res = await fetch(`${API_URL}?action=get_all`, { method: 'GET' });
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (res.ok && contentType.includes('application/json')) {
+        const data = await res.json();
+        if (data && data.success) {
+          isPhpBackendAvailable = true;
+          state.products = data.products || DEFAULT_PRODUCTS;
+          state.banners  = data.banners  || DEFAULT_BANNERS;
+          state.settings = { ...DEFAULT_SETTINGS, ...(data.settings || {}) };
+          state.orders   = data.orders   || [];
+          
+          enforceOfficialBankSettings();
 
-        // Cache lại vào LocalStorage phòng khi offline
-        localStorage.setItem('the30_products', JSON.stringify(state.products));
-        localStorage.setItem('the30_banners', JSON.stringify(state.banners));
-        localStorage.setItem('the30_settings', JSON.stringify(state.settings));
-        localStorage.setItem('the30_orders', JSON.stringify(state.orders));
-        return;
+          // Cache lại vào LocalStorage phòng khi offline
+          localStorage.setItem('the30_products', JSON.stringify(state.products));
+          localStorage.setItem('the30_banners', JSON.stringify(state.banners));
+          localStorage.setItem('the30_settings', JSON.stringify(state.settings));
+          localStorage.setItem('the30_orders', JSON.stringify(state.orders));
+          return;
+        }
+      } else {
+        isPhpBackendAvailable = false;
       }
+    } catch (err) {
+      isPhpBackendAvailable = false;
     }
-  } catch (err) {
-    console.warn('API chưa khả dụng hoặc đang chạy file tĩnh, chuyển sang dùng LocalStorage.');
   }
 
-  // Fallback đọc LocalStorage
+  // Fallback đọc LocalStorage (chế độ chạy trực tiếp trên GitHub Pages)
   const cachedProducts = localStorage.getItem('the30_products');
   const cachedBanners  = localStorage.getItem('the30_banners');
   const cachedSettings = localStorage.getItem('the30_settings');
@@ -314,47 +561,51 @@ async function loadData() {
   state.orders   = cachedOrders   ? JSON.parse(cachedOrders)   : [];
 
   enforceOfficialBankSettings();
+  await syncOrdersFromApiPay();
 }
 
 async function loadDataSilently() {
-  try {
-    const res = await fetch(`${API_URL}?action=get_all`);
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.success) {
-        const oldPending = state.orders.filter(o => o.status === 'pending').length;
-        state.orders = data.orders || [];
-        localStorage.setItem('the30_orders', JSON.stringify(state.orders));
-        const newPending = state.orders.filter(o => o.status === 'pending').length;
-
-        // CHỈ reo chuông báo đơn mới khi đang đăng nhập quyền Quản trị Admin
-        if (state.isAdminLoggedIn && newPending > oldPending) {
-          playNewOrderSound();
-          showToast(`🔔 Có ${newPending - oldPending} đơn hàng mới vừa được đặt!`);
-        }
-
-        renderCustomerOrderTracker();
-        updateAdminHeaderOrdersCount();
-        if (state.isAdminLoggedIn && state.activeAdminTab === 'orders') {
-          renderAdminOrders();
-        }
-        return;
-      }
-    }
-  } catch (e) {
-    // Đồng bộ từ LocalStorage nếu mở nhiều tab trên cùng trình duyệt
+  if (isPhpBackendAvailable === true) {
     try {
-      const cachedOrders = localStorage.getItem('the30_orders');
-      if (cachedOrders) {
-        state.orders = JSON.parse(cachedOrders);
-        renderCustomerOrderTracker();
-        updateAdminHeaderOrdersCount();
-        if (state.isAdminLoggedIn && state.activeAdminTab === 'orders') {
-          renderAdminOrders();
+      const res = await fetch(`${API_URL}?action=get_all`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.success) {
+          const oldPending = state.orders.filter(o => o.status === 'pending').length;
+          state.orders = data.orders || [];
+          localStorage.setItem('the30_orders', JSON.stringify(state.orders));
+          const newPending = state.orders.filter(o => o.status === 'pending').length;
+
+          // CHỈ reo chuông báo đơn mới khi đang đăng nhập quyền Quản trị Admin
+          if (state.isAdminLoggedIn && newPending > oldPending) {
+            playNewOrderSound();
+            showToast(`🔔 Có ${newPending - oldPending} đơn hàng mới vừa được đặt!`);
+          }
+
+          renderCustomerOrderTracker();
+          updateAdminHeaderOrdersCount();
+          if (state.isAdminLoggedIn && state.activeAdminTab === 'orders') {
+            renderAdminOrders();
+          }
+          return;
         }
       }
-    } catch (err) {}
+    } catch (e) {}
   }
+
+  // Đồng bộ từ LocalStorage + đối chiếu trực tiếp từ ApiPay (GitHub Pages)
+  try {
+    const cachedOrders = localStorage.getItem('the30_orders');
+    if (cachedOrders) {
+      state.orders = JSON.parse(cachedOrders);
+    }
+    await syncOrdersFromApiPay();
+    renderCustomerOrderTracker();
+    updateAdminHeaderOrdersCount();
+    if (state.isAdminLoggedIn && state.activeAdminTab === 'orders') {
+      renderAdminOrders();
+    }
+  } catch (err) {}
 }
 
 async function refreshData() {
@@ -967,41 +1218,7 @@ async function handleProceedToOrder() {
     createdAt: new Date().toISOString()
   };
 
-  // Lưu đơn vào API backend (PHP hoặc Vercel Serverless để tạo đơn trên ApiPay)
-  try {
-    const res = await fetch(`${API_URL}?action=create_order`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(orderData)
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.success && data.order) {
-        orderData.apipayPublicId = data.order.apipayPublicId || '';
-        orderData.apipayQrUrl = data.order.apipayQrUrl || '';
-        orderData.apipayPayUrl = data.order.apipayPayUrl || '';
-      }
-    }
-  } catch (err) {
-    // Thử gọi Serverless API (/api/apipay) nếu chạy trên Vercel
-    try {
-      const res2 = await fetch(`/api/apipay?action=create_payment`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId: orderData.id, amount: orderData.totalAmount })
-      });
-      if (res2.ok) {
-        const data2 = await res2.json();
-        if (data2 && data2.success && data2.apipay) {
-          orderData.apipayPublicId = data2.apipay.publicId || '';
-          orderData.apipayQrUrl = data2.apipay.qrUrl || '';
-          orderData.apipayPayUrl = data2.apipay.payUrl || '';
-        }
-      }
-    } catch (e2) {}
-  }
-
-  // Lưu vào LocalStorage đơn hàng và ghi nhận đây là đơn của khách này
+  // Lưu vào LocalStorage đơn hàng và ghi nhận đây là đơn của khách này ngay lập tức
   state.orders.unshift(orderData);
   localStorage.setItem('the30_orders', JSON.stringify(state.orders));
 
@@ -1019,9 +1236,29 @@ async function handleProceedToOrder() {
   renderCustomerOrderTracker();
   updateAdminHeaderOrdersCount();
 
-  // Đóng Drawer giỏ hàng & Mở Modal Mã QR Thanh Toán
+  // Đóng Drawer giỏ hàng & Mở Modal Mã QR Thanh Toán ngay lập tức
   closeCartDrawer();
   openQrModal(orderData);
+
+  // Đồng bộ đơn hàng lên Backend PHP (nếu có) và khởi tạo Payment Request trực tiếp trên ApiPay (GitHub Pages)
+  if (isPhpBackendAvailable === true) {
+    try {
+      const res = await fetch(`${API_URL}?action=create_order`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(orderData)
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.success && data.order) {
+          orderData.apipayPublicId = data.order.apipayPublicId || orderData.apipayPublicId || '';
+          orderData.apipayQrUrl = data.order.apipayQrUrl || orderData.apipayQrUrl || '';
+          orderData.apipayPayUrl = data.order.apipayPayUrl || orderData.apipayPayUrl || '';
+          localStorage.setItem('the30_orders', JSON.stringify(state.orders));
+        }
+      }
+    } catch (err) {}
+  }
 }
 
 let currentPollingOrderId = null;
@@ -1105,9 +1342,21 @@ function openQrModal(order) {
   accountEl.textContent = bankAccount;
   accountNameEl.textContent = bankAccountName;
   
-  // Cú pháp chuyển khoản chuẩn: THE30 [Mã_Đơn]
-  const transferContent = `THE30 ${order.id}`;
+  // Cú pháp chuyển khoản chuẩn không dấu gạch ngang để mọi ngân hàng giữ nguyên 100%
+  const transferContent = getOrderTransferContent(order.id);
   contentEl.textContent = transferContent;
+
+  const vietQrCode = (bankCode.toUpperCase() === 'VIETINBANK') ? 'ICB' : bankCode;
+  const bank = encodeURIComponent(vietQrCode);
+  const acc = encodeURIComponent(bankAccount);
+  const name = encodeURIComponent(bankAccountName);
+  const vietQrUrl = `https://img.vietqr.io/image/${bank}-${acc}-compact2.png?amount=${order.totalAmount}&addInfo=${encodeURIComponent(transferContent)}&accountName=${name}`;
+
+  qrImg.onerror = () => {
+    if (qrImg.src !== vietQrUrl) {
+      qrImg.src = vietQrUrl;
+    }
+  };
 
   // 1. Ưu tiên dùng mã QR chính thức trả về từ ApiPay (nếu có)
   if (order.apipayQrUrl && order.apipayQrUrl.trim() !== '') {
@@ -1115,16 +1364,20 @@ function openQrModal(order) {
   } else if (state.settings.qrImageUrl && state.settings.qrImageUrl.trim() !== '') {
     qrImg.src = state.settings.qrImageUrl;
   } else {
-    // 2. Tự động sinh VietQR chuẩn ngân hàng Napas 24/7 (VietinBank - 100880871374 - THE30s_COFFEE)
-    const vietQrCode = (bankCode.toUpperCase() === 'VIETINBANK') ? 'ICB' : bankCode;
-    const bank = encodeURIComponent(vietQrCode);
-    const acc = encodeURIComponent(bankAccount);
-    const name = encodeURIComponent(bankAccountName);
-    const vietQrUrl = `https://img.vietqr.io/image/${bank}-${acc}-compact2.png?amount=${order.totalAmount}&addInfo=${encodeURIComponent(transferContent)}&accountName=${name}`;
+    // 2. Hiển thị tức thì VietQR chuẩn Napas 24/7 trong lúc đồng bộ Payment Request với ApiPay
     qrImg.src = vietQrUrl;
   }
 
   modal.classList.remove('hidden');
+
+  // 3. Tự động khởi tạo Payment Request trực tiếp trên ApiPay (chạy ngay trên GitHub Pages)
+  if (!order.apipayPublicId) {
+    createApiPayPaymentDirect(order).then(apipayInfo => {
+      if (apipayInfo && apipayInfo.qrUrl && currentPollingOrderId === order.id) {
+        qrImg.src = apipayInfo.qrUrl;
+      }
+    }).catch(() => {});
+  }
 
   // Khởi động vòng lặp kiểm tra tự động trạng thái thanh toán (Polling mỗi 3 giây)
   startPaymentPolling(order.id);
@@ -1158,29 +1411,28 @@ async function checkPaymentStatus(orderId) {
   const order = state.orders.find(o => o.id === orderId);
   const apipayPid = order && order.apipayPublicId ? order.apipayPublicId : '';
 
-  // 1. Kiểm tra qua Backend PHP (api.php + webhook.php)
+  // 1. Kiểm tra trực tiếp trên hệ thống ApiPay Live (Hoạt động 100% trên GitHub Pages!)
   try {
-    const res = await fetch(`${API_URL}?action=check_payment_status&orderId=${encodeURIComponent(orderId)}&apipayPublicId=${encodeURIComponent(apipayPid)}`);
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.success && (data.paid || data.isPaid || data.paymentStatus === 'paid')) {
-        onPaymentSuccess(orderId, false);
-        return true;
-      }
+    const isPaidOnApiPay = await checkApiPayOrderDirect(orderId);
+    if (isPaidOnApiPay) {
+      onPaymentSuccess(orderId, false);
+      return true;
     }
-  } catch (err) {}
+  } catch (errDirect) {}
 
-  // 2. Kiểm tra qua Serverless API (/api/apipay nếu triển khai trên Vercel)
-  try {
-    const res2 = await fetch(`/api/apipay?action=check_payment&orderId=${encodeURIComponent(orderId)}&publicId=${encodeURIComponent(apipayPid)}`);
-    if (res2.ok) {
-      const data2 = await res2.json();
-      if (data2 && data2.success && data2.paid) {
-        onPaymentSuccess(orderId, false);
-        return true;
+  // 2. Kiểm tra qua Backend PHP (nếu chạy trên hosting có PHP)
+  if (isPhpBackendAvailable === true) {
+    try {
+      const res = await fetch(`${API_URL}?action=check_payment_status&orderId=${encodeURIComponent(orderId)}&apipayPublicId=${encodeURIComponent(apipayPid)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.success && (data.paid || data.isPaid || data.paymentStatus === 'paid')) {
+          onPaymentSuccess(orderId, false);
+          return true;
+        }
       }
-    }
-  } catch (err2) {}
+    } catch (err) {}
+  }
 
   // 3. Kiểm tra đồng bộ trong LocalStorage
   try {
