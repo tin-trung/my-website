@@ -967,15 +967,38 @@ async function handleProceedToOrder() {
     createdAt: new Date().toISOString()
   };
 
-  // Lưu đơn vào API backend
+  // Lưu đơn vào API backend (PHP hoặc Vercel Serverless để tạo đơn trên ApiPay)
   try {
-    await fetch(`${API_URL}?action=create_order`, {
+    const res = await fetch(`${API_URL}?action=create_order`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(orderData)
     });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.success && data.order) {
+        orderData.apipayPublicId = data.order.apipayPublicId || '';
+        orderData.apipayQrUrl = data.order.apipayQrUrl || '';
+        orderData.apipayPayUrl = data.order.apipayPayUrl || '';
+      }
+    }
   } catch (err) {
-    console.warn('Lưu đơn vào LocalStorage');
+    // Thử gọi Serverless API (/api/apipay) nếu chạy trên Vercel
+    try {
+      const res2 = await fetch(`/api/apipay?action=create_payment`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderId: orderData.id, amount: orderData.totalAmount })
+      });
+      if (res2.ok) {
+        const data2 = await res2.json();
+        if (data2 && data2.success && data2.apipay) {
+          orderData.apipayPublicId = data2.apipay.publicId || '';
+          orderData.apipayQrUrl = data2.apipay.qrUrl || '';
+          orderData.apipayPayUrl = data2.apipay.payUrl || '';
+        }
+      }
+    } catch (e2) {}
   }
 
   // Lưu vào LocalStorage đơn hàng và ghi nhận đây là đơn của khách này
@@ -1086,11 +1109,13 @@ function openQrModal(order) {
   const transferContent = `THE30 ${order.id}`;
   contentEl.textContent = transferContent;
 
-  // Nếu Quản lý đã tải lên ảnh mã QR riêng của quán
-  if (state.settings.qrImageUrl && state.settings.qrImageUrl.trim() !== '') {
+  // 1. Ưu tiên dùng mã QR chính thức trả về từ ApiPay (nếu có)
+  if (order.apipayQrUrl && order.apipayQrUrl.trim() !== '') {
+    qrImg.src = order.apipayQrUrl;
+  } else if (state.settings.qrImageUrl && state.settings.qrImageUrl.trim() !== '') {
     qrImg.src = state.settings.qrImageUrl;
   } else {
-    // Tự động sinh VietQR chuẩn ngân hàng Napas 24/7 (VietinBank - 100880871374 - THE30s_COFFEE)
+    // 2. Tự động sinh VietQR chuẩn ngân hàng Napas 24/7 (VietinBank - 100880871374 - THE30s_COFFEE)
     const vietQrCode = (bankCode.toUpperCase() === 'VIETINBANK') ? 'ICB' : bankCode;
     const bank = encodeURIComponent(vietQrCode);
     const acc = encodeURIComponent(bankAccount);
@@ -1130,8 +1155,12 @@ function stopPaymentPolling() {
 }
 
 async function checkPaymentStatus(orderId) {
+  const order = state.orders.find(o => o.id === orderId);
+  const apipayPid = order && order.apipayPublicId ? order.apipayPublicId : '';
+
+  // 1. Kiểm tra qua Backend PHP (api.php + webhook.php)
   try {
-    const res = await fetch(`${API_URL}?action=check_payment_status&orderId=${encodeURIComponent(orderId)}`);
+    const res = await fetch(`${API_URL}?action=check_payment_status&orderId=${encodeURIComponent(orderId)}&apipayPublicId=${encodeURIComponent(apipayPid)}`);
     if (res.ok) {
       const data = await res.json();
       if (data && data.success && (data.paid || data.isPaid || data.paymentStatus === 'paid')) {
@@ -1141,7 +1170,19 @@ async function checkPaymentStatus(orderId) {
     }
   } catch (err) {}
 
-  // Kiểm tra đồng bộ trong LocalStorage
+  // 2. Kiểm tra qua Serverless API (/api/apipay nếu triển khai trên Vercel)
+  try {
+    const res2 = await fetch(`/api/apipay?action=check_payment&orderId=${encodeURIComponent(orderId)}&publicId=${encodeURIComponent(apipayPid)}`);
+    if (res2.ok) {
+      const data2 = await res2.json();
+      if (data2 && data2.success && data2.paid) {
+        onPaymentSuccess(orderId, false);
+        return true;
+      }
+    }
+  } catch (err2) {}
+
+  // 3. Kiểm tra đồng bộ trong LocalStorage
   try {
     const cachedOrders = JSON.parse(localStorage.getItem('the30_orders') || '[]');
     const found = cachedOrders.find(o => o.id === orderId);

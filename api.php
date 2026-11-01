@@ -167,6 +167,50 @@ function writeFileJson($filePath, $data) {
     return file_put_contents($filePath, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
 }
 
+define('APIPAY_ACCESS_KEY', '89c1dddbdf3378cbf20e319b3f6111847a7c251f173900f9866a5a791ac3260c');
+define('APIPAY_SECRET_KEY', '59h4pFKdXKV5AFam3nikR0OYVX/ewcOzkuxIm9ZPLnBZUN2uzEM0F4KzPT15NtkPslLHhTubfyfGtB3m+XDvQA==');
+define('APIPAY_BANK_PUBLIC_ID', 'cmvxjzmx504zt01mtsg7gr1by');
+
+// Gọi API ApiPay tạo yêu cầu thanh toán chính thức (POST /v1/client/payment-requests)
+function createApiPayPaymentRequest($orderId, $amount) {
+    if (!function_exists('curl_init')) return null;
+    $token = base64_encode(APIPAY_ACCESS_KEY . ':' . APIPAY_SECRET_KEY);
+    $payload = json_encode([
+        'bankPublicId' => APIPAY_BANK_PUBLIC_ID,
+        'amount'       => strval(intval($amount)),
+        'content'      => 'THE30 ' . $orderId,
+        'title'        => 'Don hang ' . $orderId . ' - The 30 Coffee'
+    ], JSON_UNESCAPED_UNICODE);
+
+    $ch = curl_init('https://app.apipay.vn/v1/client/payment-requests');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 8);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'Content-Type: application/json',
+        'Authorization: Bearer ' . $token
+    ]);
+    $resp = curl_exec($ch);
+    curl_close($ch);
+    if (!$resp) return null;
+    $json = json_decode($resp, true);
+    return (isset($json['data']) && is_array($json['data'])) ? $json['data'] : null;
+}
+
+// Gọi API ApiPay kiểm tra trạng thái đơn thanh toán theo thời gian thực
+function checkApiPayPaymentRequest($publicId) {
+    if (empty($publicId) || !function_exists('curl_init')) return null;
+    $ch = curl_init('https://app.apipay.vn/v1/payment-requests/' . urlencode($publicId));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 6);
+    $resp = curl_exec($ch);
+    curl_close($ch);
+    if (!$resp) return null;
+    $json = json_decode($resp, true);
+    return (isset($json['data']) && is_array($json['data'])) ? $json['data'] : null;
+}
+
 $action = isset($_GET['action']) ? $_GET['action'] : '';
 
 switch ($action) {
@@ -201,19 +245,27 @@ switch ($action) {
         }
         $orders = readFileJson($ordersFile, []);
         $orderId = (!empty($input['id'])) ? trim($input['id']) : ('ORD-' . strtoupper(substr(md5(uniqid(rand(), true)), 0, 6)));
+        $totalAmount = intval($input['totalAmount']);
+
+        // Khởi tạo yêu cầu thanh toán trực tiếp trên hệ thống ApiPay
+        $apipayData = createApiPayPaymentRequest($orderId, $totalAmount);
+
         $newOrder = [
             'id' => $orderId,
-            'customerPhone' => isset($input['customerPhone']) ? trim($input['customerPhone']) : '',
-            'customerName'  => isset($input['customerName']) ? trim($input['customerName']) : 'Khách hàng',
-            'orderType'     => isset($input['orderType']) ? $input['orderType'] : 'takeaway', // takeaway, dinein, delivery
-            'address'       => isset($input['address']) ? trim($input['address']) : '',
-            'note'          => isset($input['note']) ? trim($input['note']) : '',
-            'items'         => $input['items'], // [{id, name, price, quantity, note}]
-            'totalAmount'   => intval($input['totalAmount']),
-            'status'        => 'pending', // pending, preparing, shipping, completed, cancelled
-            'paymentStatus' => 'unpaid',  // unpaid, paid, paid_reported
-            'createdAt'     => date('Y-m-d H:i:s'),
-            'timestamp'     => time()
+            'customerPhone'  => isset($input['customerPhone']) ? trim($input['customerPhone']) : '',
+            'customerName'   => isset($input['customerName']) ? trim($input['customerName']) : 'Khách hàng',
+            'orderType'      => isset($input['orderType']) ? $input['orderType'] : 'takeaway',
+            'address'        => isset($input['address']) ? trim($input['address']) : '',
+            'note'           => isset($input['note']) ? trim($input['note']) : '',
+            'items'          => $input['items'],
+            'totalAmount'    => $totalAmount,
+            'status'         => 'pending',
+            'paymentStatus'  => 'unpaid',
+            'apipayPublicId' => ($apipayData && isset($apipayData['publicId'])) ? $apipayData['publicId'] : '',
+            'apipayQrUrl'    => ($apipayData && isset($apipayData['qrUrl'])) ? $apipayData['qrUrl'] : '',
+            'apipayPayUrl'   => ($apipayData && isset($apipayData['payUrl'])) ? $apipayData['payUrl'] : '',
+            'createdAt'      => date('Y-m-d H:i:s'),
+            'timestamp'      => time()
         ];
         array_unshift($orders, $newOrder); // Đơn mới nhất lên đầu
         writeFileJson($ordersFile, $orders);
@@ -224,19 +276,40 @@ switch ($action) {
     case 'check_payment_status':
     case 'check_order_payment':
         $orderId = isset($_GET['orderId']) ? trim($_GET['orderId']) : '';
+        $publicIdParam = isset($_GET['apipayPublicId']) ? trim($_GET['apipayPublicId']) : '';
         $orders = readFileJson($ordersFile, []);
         $cleanSearch = str_replace('-', '', strtoupper($orderId));
 
-        $foundOrder = null;
-        foreach ($orders as $o) {
+        $foundIndex = -1;
+        foreach ($orders as $idx => $o) {
             $cleanId = str_replace('-', '', strtoupper($o['id']));
             if ($cleanId === $cleanSearch || strtoupper($o['id']) === strtoupper($orderId)) {
-                $foundOrder = $o;
+                $foundIndex = $idx;
                 break;
             }
         }
 
-        if ($foundOrder) {
+        if ($foundIndex >= 0) {
+            $foundOrder = &$orders[$foundIndex];
+            // Nếu chưa thanh toán trong file JSON, chủ động gọi thẳng ApiPay kiểm tra trạng thái
+            if ($foundOrder['paymentStatus'] !== 'paid') {
+                $checkPid = !empty($foundOrder['apipayPublicId']) ? $foundOrder['apipayPublicId'] : $publicIdParam;
+                if (!empty($checkPid)) {
+                    $apipayStatus = checkApiPayPaymentRequest($checkPid);
+                    if ($apipayStatus && isset($apipayStatus['status'])) {
+                        $st = strtoupper($apipayStatus['status']);
+                        if (in_array($st, ['COMPLETED', 'PAID', 'SUCCESS', 'DONE'])) {
+                            $foundOrder['paymentStatus'] = 'paid';
+                            if ($foundOrder['status'] === 'pending') {
+                                $foundOrder['status'] = 'preparing';
+                            }
+                            $foundOrder['paidAt'] = date('Y-m-d H:i:s');
+                            writeFileJson($ordersFile, $orders);
+                        }
+                    }
+                }
+            }
+
             $isPaid = ($foundOrder['paymentStatus'] === 'paid');
             echo json_encode([
                 'success' => true,
