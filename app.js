@@ -133,6 +133,7 @@ let state = {
   currentUser: null, // { phone, name }
   myOrderIds: [], // Danh sách mã đơn của riêng khách trên thiết bị này
   dismissedTrackerIds: [],
+  favorites: [], // Danh sách mã món khách đã thả tim (lưu trên thiết bị)
   currentCategory: 'all',
   currentSort: 'default',
   searchQuery: '',
@@ -228,6 +229,12 @@ async function pushCloudEvent(eventType, payload = {}) {
   } catch (e) {}
 }
 
+function isPaidPaymentStatus(st) {
+  return st === 'paid' || st === 'paid_reported';
+}
+
+// Gộp đơn hàng nhận từ thiết bị khác. Mỗi lần khách/quán thay đổi đơn sẽ tăng số phiên bản `rev`,
+// bản cũ hơn (rev thấp hơn) không được ghi đè bản mới để tránh "quay ngược" trạng thái đơn.
 function mergeOrderIntoState(incomingOrder) {
   if (!incomingOrder || !incomingOrder.id) return false;
   const idx = state.orders.findIndex(o => o.id === incomingOrder.id);
@@ -238,8 +245,74 @@ function mergeOrderIntoState(incomingOrder) {
   const current = state.orders[idx];
   const prevStatus = current.status;
   const prevPayment = current.paymentStatus;
-  state.orders[idx] = { ...current, ...incomingOrder };
-  return (prevStatus !== state.orders[idx].status || prevPayment !== state.orders[idx].paymentStatus);
+  const prevRev = Number(current.rev) || 0;
+  const inRev = Number(incomingOrder.rev) || 0;
+
+  let next;
+  if (inRev < prevRev) {
+    // Bản tin cũ: chỉ nhận thêm thông tin đã thanh toán (nếu có)
+    next = { ...current };
+    if (isPaidPaymentStatus(incomingOrder.paymentStatus) && !isPaidPaymentStatus(current.paymentStatus)) {
+      next.paymentStatus = incomingOrder.paymentStatus;
+    }
+  } else {
+    next = { ...current, ...incomingOrder };
+    // Khách chỉ được hủy khi quán chưa xác nhận: nếu quán đã nhận đơn thì bỏ qua lệnh hủy của khách
+    if (
+      incomingOrder.status === 'cancelled' &&
+      incomingOrder.cancelledBy === 'customer' &&
+      current.status !== 'pending' &&
+      current.status !== 'cancelled'
+    ) {
+      next = { ...current };
+    }
+    if (isPaidPaymentStatus(current.paymentStatus) && !isPaidPaymentStatus(next.paymentStatus)) {
+      next.paymentStatus = current.paymentStatus;
+    }
+  }
+
+  state.orders[idx] = next;
+  return (
+    prevStatus !== next.status ||
+    prevPayment !== next.paymentStatus ||
+    prevRev !== (Number(next.rev) || 0)
+  );
+}
+
+// Thông báo cho Quản lý khi khách sửa / hủy đơn, và cho Khách khi quán đổi trạng thái đơn
+function handleOrderEventSideEffects(prevSnap, order) {
+  if (!order || !prevSnap) return;
+  const rev = Number(order.rev) || 0;
+
+  if (state.isAdminLoggedIn) {
+    if (order.status === 'cancelled' && prevSnap.status !== 'cancelled' && order.cancelledBy === 'customer') {
+      playNewOrderSound();
+      showToast(`❌ Khách đã hủy đơn ${order.id}${order.refundPending ? ' (đơn đã thanh toán - cần hoàn tiền)' : ''}`, 'info');
+    } else if (rev > prevSnap.rev && order.status === 'pending' && order.editedAt) {
+      playNewOrderSound();
+      showToast(`✏️ Khách vừa chỉnh sửa đơn ${order.id} - vui lòng xem lại trước khi làm!`, 'info');
+    }
+    return;
+  }
+
+  const isMine = getMyPurchasedOrders().some(o => o.id === order.id);
+  if (isMine && order.status !== prevSnap.status && order.cancelledBy !== 'customer') {
+    notifyCustomerOrderUpdate(order);
+  }
+}
+
+function notifyCustomerOrderUpdate(order) {
+  const detail = getCustomerOrderStatusDetail(order);
+  playTingTingSound();
+  showToast(`Đơn ${order.id}: ${detail.headline}`, 'info');
+  try {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification('The 30 - Coffee & Tea', {
+        body: `Đơn ${order.id}: ${detail.headline}`,
+        icon: 'logo.jpg'
+      });
+    }
+  } catch (e) {}
 }
 
 function applyCloudEvent(evt, notifyUI = true) {
@@ -253,8 +326,13 @@ function applyCloudEvent(evt, notifyUI = true) {
   const oldPending = state.orders.filter(o => o.status === 'pending').length;
 
   if (eventType === 'UPSERT_ORDER' && payload && payload.order) {
+    const prevOrder = state.orders.find(o => o.id === payload.order.id);
+    const prevSnap = prevOrder ? { status: prevOrder.status, rev: Number(prevOrder.rev) || 0 } : null;
     ordersChanged = mergeOrderIntoState(payload.order);
     localStorage.setItem('the30_orders', JSON.stringify(state.orders));
+    if (notifyUI && ordersChanged) {
+      handleOrderEventSideEffects(prevSnap, state.orders.find(o => o.id === payload.order.id));
+    }
   } else if (eventType === 'DELETE_ORDER' && payload && payload.orderId) {
     const beforeLen = state.orders.length;
     state.orders = state.orders.filter(o => o.id !== payload.orderId);
@@ -446,10 +524,10 @@ async function callApiPayDirect(endpointPath, method = 'GET', bodyObj = null) {
 
 async function createApiPayPaymentDirect(orderData) {
   if (!orderData || !orderData.id) return null;
-  if (orderData.apipayPublicId && orderData.apipayQrUrl) {
+  if (orderData.apipayPublicId) {
     return {
       publicId: orderData.apipayPublicId,
-      qrUrl: orderData.apipayQrUrl,
+      content: orderData.transferContent || getOrderTransferContent(orderData.id),
       payUrl: orderData.apipayPayUrl
     };
   }
@@ -748,6 +826,13 @@ async function initApp() {
     }
   }
 
+  try {
+    const savedFav = JSON.parse(localStorage.getItem('the30_favorites') || '[]');
+    state.favorites = Array.isArray(savedFav) ? savedFav : [];
+  } catch (e) {
+    state.favorites = [];
+  }
+
   // 2. Tải dữ liệu từ API / Cloud Sync hoặc fallback LocalStorage
   await loadData();
 
@@ -1041,6 +1126,21 @@ function handleSort(sortVal) {
   renderProducts();
 }
 
+function toggleFavorite(productId, evt) {
+  if (evt && evt.stopPropagation) evt.stopPropagation();
+  if (!Array.isArray(state.favorites)) state.favorites = [];
+  const idx = state.favorites.indexOf(productId);
+  if (idx > -1) {
+    state.favorites.splice(idx, 1);
+    showToast('Đã bỏ khỏi danh sách yêu thích.', 'info');
+  } else {
+    state.favorites.push(productId);
+    showToast('❤️ Đã thêm vào danh sách món yêu thích!');
+  }
+  localStorage.setItem('the30_favorites', JSON.stringify(state.favorites));
+  renderProducts();
+}
+
 function handleSearch(query) {
   state.searchQuery = query.trim().toLowerCase();
   renderProducts();
@@ -1065,7 +1165,9 @@ function renderProducts() {
   let list = [...state.products];
 
   // 1. Lọc theo danh mục
-  if (state.currentCategory !== 'all') {
+  if (state.currentCategory === 'favorites') {
+    list = list.filter(p => state.favorites.includes(p.id));
+  } else if (state.currentCategory !== 'all') {
     list = list.filter(p => p.category === state.currentCategory);
   }
 
@@ -1108,6 +1210,11 @@ function renderProducts() {
             <i class="fa-solid fa-fire text-amber-200"></i> Best Seller
           </div>
         ` : ''}
+
+        <!-- Nút thả tim yêu thích -->
+        <button onclick="toggleFavorite('${item.id}', event)" title="${state.favorites.includes(item.id) ? 'Bỏ yêu thích' : 'Thêm vào yêu thích'}" class="absolute top-2.5 right-2.5 w-8 h-8 rounded-full bg-white/90 hover:bg-white shadow flex items-center justify-center active:scale-90 transition">
+          <i class="${state.favorites.includes(item.id) ? 'fa-solid text-rose-500' : 'fa-regular text-slate-400'} fa-heart text-sm"></i>
+        </button>
 
         <!-- Nút thêm nhanh tròn ở góc trên mobile -->
         <button onclick="handleAddToCartClick('${item.id}')" title="Thêm vào giỏ" class="sm:hidden absolute bottom-2.5 right-2.5 w-9 h-9 rounded-full bg-brand-900 text-white flex items-center justify-center shadow-lg active:scale-90 transition">
@@ -1443,11 +1550,14 @@ function getCustomerOrderStatusDetail(order) {
       badgeClass: 'bg-emerald-100 text-emerald-800 border border-emerald-300'
     };
   }
+  const cancelledByCustomer = order.cancelledBy === 'customer';
   return {
     stepIndex: 0,
     step3ShortLabel,
-    headline: '❌ Đơn hàng đã hủy',
-    subtext: 'Đơn hàng này đã bị hủy.',
+    headline: cancelledByCustomer ? '❌ Bạn đã hủy đơn hàng này' : '❌ Đơn hàng đã bị quán hủy',
+    subtext: order.refundPending
+      ? 'Đơn đã thanh toán trước đó - quán sẽ liên hệ hoàn tiền cho bạn sớm nhất.'
+      : (cancelledByCustomer ? 'Bạn có thể bấm "Đặt lại" để chọn lại các món này.' : 'Vui lòng liên hệ quán nếu cần hỗ trợ thêm.'),
     boxClass: 'bg-rose-50 border-rose-200 text-rose-900',
     badgeClass: 'bg-rose-100 text-rose-800 border border-rose-300'
   };
@@ -1502,6 +1612,7 @@ function renderCartOrderHistory() {
               ${order.id}
             </span>
             <span class="text-[10px] text-slate-400">${formatDate(order.createdAt)}</span>
+            ${order.editedAt ? `<span class="text-[10px] font-bold text-sky-700 bg-sky-50 border border-sky-200 px-1.5 py-0.5 rounded-full">✏️ Đã sửa</span>` : ''}
           </div>
           ${paymentLabel}
         </div>
@@ -1554,9 +1665,61 @@ function renderCartOrderHistory() {
             <span>Mở mã QR để thanh toán đơn này</span>
           </button>
         ` : ''}
+
+        ${renderCustomerOrderActions(order)}
       </div>
     `;
   }).join('');
+}
+
+// Các nút thao tác của khách trên từng đơn: Sửa / Thêm món / Hủy (khi quán chưa xác nhận), Đặt lại, Đánh giá
+function renderCustomerOrderActions(order) {
+  const parts = [];
+
+  if (canCustomerModifyOrder(order)) {
+    parts.push(`
+      <div class="grid grid-cols-2 gap-2">
+        <button onclick="openEditOrderModal('${order.id}')" class="bg-brand-900 hover:bg-brand-800 text-white text-xs font-bold py-2 rounded-lg shadow-sm transition flex items-center justify-center gap-1.5">
+          <i class="fa-solid fa-pen-to-square"></i><span>Sửa / Thêm món</span>
+        </button>
+        <button onclick="customerCancelOrder('${order.id}')" class="bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 text-xs font-bold py-2 rounded-lg transition flex items-center justify-center gap-1.5">
+          <i class="fa-solid fa-ban"></i><span>Hủy đơn</span>
+        </button>
+      </div>
+      <p class="text-[10px] text-slate-400 text-center leading-snug">Bạn có thể sửa, thêm món hoặc hủy đến khi quán xác nhận làm đơn.</p>
+    `);
+  } else if (order.status === 'preparing' || order.status === 'shipping') {
+    parts.push(`
+      <p class="text-[10px] text-slate-500 text-center leading-snug bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-2">
+        🔒 Quán đã nhận đơn nên không thể sửa/hủy nữa. Cần hỗ trợ gọi <a href="tel:0949551441" class="font-bold text-brand-900 underline">0949.551.441</a>
+      </p>
+    `);
+  }
+
+  if (order.status === 'completed') {
+    const rating = Number(order.rating) || 0;
+    const stars = [1, 2, 3, 4, 5].map(n => `
+      <button onclick="rateOrder('${order.id}', ${n})" title="${n} sao" class="text-lg leading-none ${n <= rating ? 'text-amber-400' : 'text-slate-300 hover:text-amber-300'} transition active:scale-90">
+        <i class="fa-solid fa-star"></i>
+      </button>
+    `).join('');
+    parts.push(`
+      <div class="flex items-center justify-between bg-amber-50/70 border border-amber-200 rounded-lg px-2.5 py-1.5">
+        <span class="text-[11px] font-semibold text-amber-900">${rating ? 'Cảm ơn bạn đã đánh giá!' : 'Bạn thấy đơn này thế nào?'}</span>
+        <div class="flex items-center gap-1">${stars}</div>
+      </div>
+    `);
+  }
+
+  if (order.status === 'completed' || order.status === 'cancelled') {
+    parts.push(`
+      <button onclick="reorderOrder('${order.id}')" class="w-full bg-white hover:bg-brand-50 text-brand-900 border border-brand-300 text-xs font-bold py-2 rounded-lg transition flex items-center justify-center gap-1.5">
+        <i class="fa-solid fa-rotate-right"></i><span>Đặt lại đơn này</span>
+      </button>
+    `);
+  }
+
+  return parts.length ? `<div class="space-y-2">${parts.join('')}</div>` : '';
 }
 
 function renderCustomerOrderTracker() {
@@ -1570,6 +1733,459 @@ function reopenOrderQr(orderId) {
     closeCartDrawer();
     openQrModal(order);
   }
+}
+
+// --- QUẢN LÝ ĐƠN ĐÃ ĐẶT: SỬA / THÊM MÓN / HỦY / ĐẶT LẠI / ĐÁNH GIÁ ---
+function escapeHtml(str) {
+  return String(str == null ? '' : str).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+function isOrderPaid(order) {
+  return !!order && isPaidPaymentStatus(order.paymentStatus);
+}
+
+// Khách chỉ được sửa / thêm món / hủy khi quán CHƯA xác nhận làm đơn
+function canCustomerModifyOrder(order) {
+  return !!order && order.status === 'pending';
+}
+
+function bumpOrderRev(order) {
+  order.rev = (Number(order.rev) || 0) + 1;
+  return order;
+}
+
+function persistAndBroadcastOrder(order) {
+  localStorage.setItem('the30_orders', JSON.stringify(state.orders));
+  pushCloudEvent('UPSERT_ORDER', { order });
+}
+
+function refreshOrderViews() {
+  renderCartItems();
+  updateCartBadge();
+  updateAdminHeaderOrdersCount();
+  if (state.isAdminLoggedIn && state.activeAdminTab === 'orders') {
+    renderAdminOrders();
+  }
+}
+
+async function customerCancelOrder(orderId) {
+  const order = state.orders.find(o => o.id === orderId);
+  if (!order) return;
+
+  if (!canCustomerModifyOrder(order)) {
+    alert('Quán đã xác nhận làm đơn này nên không thể hủy nữa. Vui lòng gọi hotline 0949.551.441 để được hỗ trợ.');
+    renderCartItems();
+    return;
+  }
+
+  const paid = isOrderPaid(order);
+  const confirmMsg = paid
+    ? `Đơn ${order.id} đã thanh toán ${formatPrice(order.totalAmount)}.\nNếu hủy, quán sẽ liên hệ hoàn tiền lại cho bạn. Bạn vẫn muốn hủy đơn?`
+    : `Bạn chắc chắn muốn hủy đơn ${order.id}?`;
+  if (!confirm(confirmMsg)) return;
+
+  order.status = 'cancelled';
+  order.cancelledBy = 'customer';
+  order.cancelledAt = new Date().toISOString();
+  if (paid) order.refundPending = true;
+  bumpOrderRev(order);
+  persistAndBroadcastOrder(order);
+
+  if (currentPollingOrderId === order.id) {
+    closeQrModal();
+  }
+
+  if (isPhpBackendAvailable === true) {
+    try {
+      await fetch(`${API_URL}?action=update_order_status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderId: order.id, status: 'cancelled' })
+      });
+    } catch (e) {}
+  }
+
+  refreshOrderViews();
+  showToast(`Đã hủy đơn ${order.id}.`);
+}
+
+let editingOrderDraft = null;
+
+function openEditOrderModal(orderId) {
+  const order = state.orders.find(o => o.id === orderId);
+  if (!order) return;
+  if (!canCustomerModifyOrder(order)) {
+    showToast('Quán đã xác nhận làm đơn này nên không thể chỉnh sửa nữa.', 'error');
+    renderCartItems();
+    return;
+  }
+
+  editingOrderDraft = {
+    id: order.id,
+    locked: isOrderPaid(order), // Đơn đã thanh toán: chỉ được sửa ghi chú / địa chỉ, không đổi món & số tiền
+    items: (order.items || []).map(i => ({ ...i, note: i.note || '' })),
+    orderType: order.orderType || 'takeaway',
+    address: order.address || '',
+    paymentMethod: order.paymentMethod === 'cash' ? 'cash' : 'qr',
+    saving: false
+  };
+  renderEditOrderModal();
+  document.getElementById('editOrderModal').classList.remove('hidden');
+}
+
+function closeEditOrderModal() {
+  const modal = document.getElementById('editOrderModal');
+  if (modal) modal.classList.add('hidden');
+  editingOrderDraft = null;
+}
+
+function getEditDraftTotal() {
+  if (!editingOrderDraft) return 0;
+  return editingOrderDraft.items.reduce((s, i) => s + (Number(i.price) || 0) * (Number(i.quantity) || 0), 0);
+}
+
+function renderEditOrderModal() {
+  const d = editingOrderDraft;
+  const body = document.getElementById('editOrderBody');
+  if (!d || !body) return;
+
+  const titleEl = document.getElementById('editOrderTitle');
+  if (titleEl) titleEl.textContent = `Chỉnh sửa đơn ${d.id}`;
+
+  const typeBtn = (type, icon, label) => `
+    <button type="button" onclick="editOrderSetType('${type}')" class="py-2 px-2 rounded-lg border text-xs font-semibold text-center transition ${d.orderType === type ? 'bg-brand-900 text-white border-brand-900' : 'bg-white text-slate-700 border-slate-200'}">
+      <i class="${icon} mr-1"></i>${label}
+    </button>`;
+  const payBtn = (method, icon, label) => `
+    <button type="button" onclick="editOrderSetPayment('${method}')" class="py-2 px-2 rounded-xl border-2 text-xs font-bold flex items-center justify-center gap-1.5 transition ${d.paymentMethod === method ? 'bg-brand-900 text-white border-brand-900' : 'bg-white text-slate-700 border-slate-200'}">
+      <i class="${icon}"></i><span>${label}</span>
+    </button>`;
+
+  const locLabel = d.orderType === 'dinein'
+    ? 'Số bàn của bạn *'
+    : d.orderType === 'delivery'
+      ? 'Địa chỉ nhận hàng *'
+      : 'Ghi chú cho quán (Mang đi)';
+
+  const itemsHtml = d.items.map((it, idx) => {
+    const prod = state.products.find(p => p.id === it.id);
+    const img = prod && prod.image
+      ? `<img src="${prod.image}" alt="" class="w-12 h-12 object-cover rounded-lg border border-slate-200 flex-shrink-0">`
+      : `<div class="w-12 h-12 rounded-lg bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-300 flex-shrink-0"><i class="fa-solid fa-mug-hot"></i></div>`;
+    const qtyControls = d.locked
+      ? `<span class="text-xs font-bold text-slate-700 bg-slate-100 rounded-lg px-2.5 py-1">x${it.quantity}</span>`
+      : `
+        <div class="flex items-center gap-1 bg-slate-100 rounded-lg p-1 border border-slate-200">
+          <button type="button" onclick="editOrderChangeQty(${idx}, -1)" class="w-6 h-6 rounded bg-white text-slate-700 text-xs font-bold hover:bg-slate-200">-</button>
+          <span class="w-6 text-center text-xs font-bold text-slate-900">${it.quantity}</span>
+          <button type="button" onclick="editOrderChangeQty(${idx}, 1)" class="w-6 h-6 rounded bg-brand-900 text-white text-xs font-bold hover:bg-brand-800">+</button>
+        </div>
+        <button type="button" onclick="editOrderRemoveItem(${idx})" title="Bỏ món này" class="text-slate-300 hover:text-rose-600 p-1 transition"><i class="fa-solid fa-trash-can text-xs"></i></button>`;
+    return `
+      <div class="pt-3 first:pt-0 space-y-2">
+        <div class="flex items-center gap-2.5">
+          ${img}
+          <div class="flex-1 min-w-0">
+            <h4 class="text-xs sm:text-sm font-bold text-slate-900 truncate">${escapeHtml(it.name)}</h4>
+            <p class="text-xs font-extrabold text-brand-900">${formatPrice(it.price)}</p>
+          </div>
+          ${qtyControls}
+        </div>
+        <input type="text" value="${escapeHtml(it.note)}" onchange="editOrderSetNote(${idx}, this.value)" placeholder="Chú thích: ít đá, 50% đường..." class="w-full text-xs p-1.5 bg-amber-50/60 border border-amber-200 rounded-lg focus:outline-none focus:border-amber-500 text-slate-800 placeholder-slate-400">
+      </div>`;
+  }).join('');
+
+  const addProductHtml = d.locked ? '' : `
+    <div class="bg-slate-50 border border-dashed border-slate-300 rounded-xl p-2.5 space-y-1.5">
+      <label class="text-[11px] font-bold text-slate-600">➕ Thêm món vào đơn:</label>
+      <div class="flex items-center gap-2">
+        <select id="editOrderAddSelect" class="flex-1 min-w-0 text-xs p-2 bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-brand-500">
+          ${state.products.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} - ${formatPrice(p.price)}</option>`).join('')}
+        </select>
+        <button type="button" onclick="editOrderAddProduct()" class="bg-amber-400 hover:bg-amber-300 text-brand-950 text-xs font-extrabold px-3 py-2 rounded-lg transition active:scale-95 whitespace-nowrap">Thêm</button>
+      </div>
+    </div>`;
+
+  const settingsHtml = d.locked ? `
+    <div>
+      <label class="block text-xs font-bold text-slate-700 mb-1">${locLabel}:</label>
+      <input type="text" value="${escapeHtml(d.address)}" oninput="editOrderSetAddress(this.value)" class="w-full text-xs p-2.5 bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-brand-500">
+    </div>` : `
+    <div>
+      <label class="block text-xs font-bold text-slate-700 mb-1.5">Hình thức nhận món:</label>
+      <div class="grid grid-cols-3 gap-1.5">
+        ${typeBtn('takeaway', 'fa-solid fa-bag-shopping', 'Mang đi')}
+        ${typeBtn('dinein', 'fa-solid fa-chair', 'Tại bàn')}
+        ${typeBtn('delivery', 'fa-solid fa-motorcycle', 'Giao tận nơi')}
+      </div>
+    </div>
+    <div>
+      <label class="block text-xs font-bold text-slate-700 mb-1">${locLabel}:</label>
+      <input type="text" value="${escapeHtml(d.address)}" oninput="editOrderSetAddress(this.value)" class="w-full text-xs p-2.5 bg-white border border-slate-300 rounded-lg focus:outline-none focus:border-brand-500">
+    </div>
+    <div>
+      <label class="block text-xs font-bold text-slate-700 mb-1.5">Phương thức thanh toán:</label>
+      <div class="grid grid-cols-2 gap-2">
+        ${payBtn('qr', 'fa-solid fa-qrcode text-amber-300', 'Chuyển khoản QR')}
+        ${payBtn('cash', 'fa-solid fa-money-bill-wave text-emerald-500', 'Tiền mặt')}
+      </div>
+    </div>`;
+
+  const noticeHtml = d.locked
+    ? `<div class="text-[11px] bg-emerald-50 border border-emerald-200 text-emerald-900 rounded-lg p-2.5 leading-snug">✅ Đơn này đã thanh toán nên chỉ chỉnh được ghi chú và vị trí nhận món. Muốn đổi món hãy liên hệ quán.</div>`
+    : `<div class="text-[11px] bg-amber-50 border border-amber-200 text-amber-900 rounded-lg p-2.5 leading-snug">⏳ Quán chưa xác nhận đơn nên bạn còn sửa được. Nếu đổi số tiền khi thanh toán QR, hệ thống sẽ tạo mã QR mới.</div>`;
+
+  body.innerHTML = `
+    ${noticeHtml}
+    <div class="divide-y divide-slate-100 space-y-3 bg-white">${itemsHtml}</div>
+    ${addProductHtml}
+    ${settingsHtml}
+  `;
+
+  const totalEl = document.getElementById('editOrderTotal');
+  if (totalEl) totalEl.textContent = formatPrice(getEditDraftTotal());
+  const saveBtn = document.getElementById('editOrderSaveBtn');
+  if (saveBtn) {
+    saveBtn.disabled = !!d.saving;
+    saveBtn.classList.toggle('opacity-60', !!d.saving);
+  }
+}
+
+function editOrderChangeQty(idx, delta) {
+  const d = editingOrderDraft;
+  if (!d || d.locked || !d.items[idx]) return;
+  const next = (Number(d.items[idx].quantity) || 1) + delta;
+  if (next <= 0) {
+    editOrderRemoveItem(idx);
+    return;
+  }
+  d.items[idx].quantity = next;
+  renderEditOrderModal();
+}
+
+function editOrderRemoveItem(idx) {
+  const d = editingOrderDraft;
+  if (!d || d.locked || !d.items[idx]) return;
+  if (d.items.length <= 1) {
+    showToast('Đơn cần ít nhất 1 món. Muốn bỏ cả đơn hãy bấm "Hủy đơn".', 'error');
+    return;
+  }
+  d.items.splice(idx, 1);
+  renderEditOrderModal();
+}
+
+function editOrderSetNote(idx, val) {
+  const d = editingOrderDraft;
+  if (!d || !d.items[idx]) return;
+  d.items[idx].note = String(val || '').trim();
+}
+
+function editOrderAddProduct() {
+  const d = editingOrderDraft;
+  const sel = document.getElementById('editOrderAddSelect');
+  if (!d || d.locked || !sel) return;
+  const product = state.products.find(p => p.id === sel.value);
+  if (!product) return;
+  const existing = d.items.find(i => i.id === product.id && !i.note);
+  if (existing) {
+    existing.quantity += 1;
+  } else {
+    d.items.push({ id: product.id, name: product.name, price: product.price, quantity: 1, note: '' });
+  }
+  renderEditOrderModal();
+  showToast(`Đã thêm "${product.name}" vào đơn.`);
+}
+
+function editOrderSetType(type) {
+  const d = editingOrderDraft;
+  if (!d || d.locked) return;
+  d.orderType = type;
+  renderEditOrderModal();
+}
+
+function editOrderSetPayment(method) {
+  const d = editingOrderDraft;
+  if (!d || d.locked) return;
+  d.paymentMethod = method === 'cash' ? 'cash' : 'qr';
+  renderEditOrderModal();
+}
+
+function editOrderSetAddress(val) {
+  if (editingOrderDraft) editingOrderDraft.address = String(val || '');
+}
+
+function normalizeOrderItems(items) {
+  return (items || []).map(i => ({
+    id: i.id,
+    name: i.name,
+    price: Number(i.price) || 0,
+    quantity: Number(i.quantity) || 1,
+    note: (i.note || '').trim()
+  }));
+}
+
+async function saveEditedOrder() {
+  const d = editingOrderDraft;
+  if (!d || d.saving) return;
+
+  const order = state.orders.find(o => o.id === d.id);
+  if (!order || !canCustomerModifyOrder(order)) {
+    showToast('Quán vừa xác nhận làm đơn này nên không thể chỉnh sửa nữa.', 'error');
+    closeEditOrderModal();
+    renderCartItems();
+    return;
+  }
+
+  const address = d.address.trim();
+  if (!d.locked) {
+    if (d.orderType === 'dinein' && !address) {
+      alert('Vui lòng nhập Số bàn để quán phục vụ đúng vị trí của bạn.');
+      return;
+    }
+    if (d.orderType === 'delivery' && !address) {
+      alert('Vui lòng nhập Địa chỉ giao hàng để quán giao tận nơi.');
+      return;
+    }
+  }
+
+  const newItems = normalizeOrderItems(d.items);
+  const newTotal = newItems.reduce((s, i) => s + i.price * i.quantity, 0);
+  const oldMethod = order.paymentMethod === 'cash' ? 'cash' : 'qr';
+  const newMethod = d.locked ? oldMethod : d.paymentMethod;
+  const newType = d.locked ? (order.orderType || 'takeaway') : d.orderType;
+  const amountChanged = newTotal !== order.totalAmount;
+
+  const unchanged =
+    JSON.stringify(newItems) === JSON.stringify(normalizeOrderItems(order.items)) &&
+    newType === (order.orderType || 'takeaway') &&
+    address === (order.address || '') &&
+    newMethod === oldMethod;
+  if (unchanged) {
+    showToast('Bạn chưa thay đổi gì trong đơn.', 'info');
+    closeEditOrderModal();
+    return;
+  }
+
+  d.saving = true;
+  renderEditOrderModal();
+
+  // Nếu khách đã lỡ chuyển khoản mã QR cũ: kiểm tra lại với ngân hàng trước khi đổi số tiền
+  const wasQrUnpaid = oldMethod === 'qr' && !isOrderPaid(order) && order.apipayPublicId;
+  if (wasQrUnpaid && (amountChanged || newMethod === 'cash')) {
+    try {
+      const alreadyPaid = await checkApiPayOrderDirect(order.id);
+      if (alreadyPaid) {
+        order.paymentStatus = 'paid';
+        bumpOrderRev(order);
+        persistAndBroadcastOrder(order);
+        closeEditOrderModal();
+        refreshOrderViews();
+        showToast('Đơn này vừa được thanh toán nên không thể đổi món / số tiền nữa.', 'error');
+        return;
+      }
+    } catch (e) {}
+  }
+
+  const latest = state.orders.find(o => o.id === d.id);
+  if (!latest || !canCustomerModifyOrder(latest)) {
+    showToast('Quán vừa xác nhận làm đơn này nên không thể chỉnh sửa nữa.', 'error');
+    closeEditOrderModal();
+    renderCartItems();
+    return;
+  }
+
+  const needsNewQr = newMethod === 'qr' && !isOrderPaid(latest) && (amountChanged || oldMethod !== 'qr');
+
+  latest.items = newItems;
+  latest.totalAmount = newTotal;
+  latest.orderType = newType;
+  latest.address = address;
+  latest.note = address;
+  latest.paymentMethod = newMethod;
+  if (!isOrderPaid(latest)) {
+    latest.paymentStatus = newMethod === 'cash' ? 'cash_pending' : 'unpaid';
+  }
+  if (needsNewQr || newMethod === 'cash') {
+    // Số tiền / phương thức thay đổi -> huỷ liên kết mã QR cũ để tạo yêu cầu thanh toán mới
+    latest.apipayPublicId = '';
+    latest.apipayQrUrl = '';
+    latest.apipayPayUrl = '';
+    latest.transferContent = '';
+  }
+  latest.editedAt = new Date().toISOString();
+  latest.editCount = (Number(latest.editCount) || 0) + 1;
+  bumpOrderRev(latest);
+  persistAndBroadcastOrder(latest);
+
+  closeEditOrderModal();
+  refreshOrderViews();
+
+  if (needsNewQr) {
+    closeCartDrawer();
+    openQrModal(latest);
+    showToast(`✏️ Đã cập nhật đơn ${latest.id}. Vui lòng quét mã QR mới (${formatPrice(latest.totalAmount)}).`);
+  } else {
+    showToast(`✏️ Đã cập nhật đơn ${latest.id} - quán sẽ thấy thay đổi ngay!`);
+  }
+}
+
+// Đặt lại các món của một đơn cũ vào giỏ hàng
+function reorderOrder(orderId) {
+  const order = state.orders.find(o => o.id === orderId);
+  if (!order) return;
+
+  let added = 0;
+  let skipped = 0;
+  (order.items || []).forEach(it => {
+    const product = state.products.find(p => p.id === it.id);
+    if (!product) {
+      skipped++;
+      return;
+    }
+    const note = (it.note || '').trim();
+    const qty = Number(it.quantity) || 1;
+    const existing = state.cart.find(c => c.id === product.id && (c.note || '') === note);
+    if (existing) {
+      existing.quantity += qty;
+    } else {
+      state.cart.push({
+        id: product.id,
+        name: product.name,
+        price: product.price,
+        image: product.image,
+        quantity: qty,
+        note
+      });
+    }
+    added++;
+  });
+
+  saveCart();
+  updateCartBadge();
+  renderCartItems();
+  const scrollBody = document.getElementById('cartDrawerScrollBody');
+  if (scrollBody) scrollBody.scrollTo({ top: 0, behavior: 'smooth' });
+
+  if (added === 0) {
+    showToast('Các món trong đơn này hiện không còn trong thực đơn.', 'error');
+  } else if (skipped > 0) {
+    showToast(`Đã thêm ${added} món vào giỏ (${skipped} món không còn bán).`);
+  } else {
+    showToast(`🔁 Đã thêm lại ${added} món vào giỏ hàng!`);
+  }
+}
+
+function rateOrder(orderId, stars) {
+  const order = state.orders.find(o => o.id === orderId);
+  if (!order || order.status !== 'completed') return;
+  order.rating = Math.min(5, Math.max(1, Number(stars) || 5));
+  order.ratedAt = new Date().toISOString();
+  bumpOrderRev(order);
+  persistAndBroadcastOrder(order);
+  refreshOrderViews();
+  showToast(`⭐ Cảm ơn bạn đã đánh giá ${order.rating}/5 sao cho The 30!`);
 }
 
 // --- ĐẶT HÀNG & THANH TOÁN (HỖ TRỢ CẢ CHUYỂN KHOẢN QR & TIỀN MẶT) ---
@@ -1623,6 +2239,13 @@ async function handleProceedToOrder() {
   // Lưu vào LocalStorage đơn hàng và ghi nhận đây là đơn của khách này ngay lập tức
   state.orders.unshift(orderData);
   localStorage.setItem('the30_orders', JSON.stringify(state.orders));
+
+  // Xin quyền nhận thông báo trình duyệt để báo khi quán xác nhận / giao đơn
+  try {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  } catch (e) {}
 
   if (!Array.isArray(state.myOrderIds)) state.myOrderIds = [];
   if (!state.myOrderIds.includes(orderId)) {
@@ -2207,6 +2830,20 @@ function renderSingleAdminOrderCard(order) {
               <i class="fa-solid fa-check mr-1"></i>Xong lúc: ${formatDate(order.completedAt)}
             </span>
           ` : ''}
+          ${order.editedAt ? `
+            <span class="text-[11px] text-sky-800 bg-sky-50 px-2 py-0.5 rounded font-bold border border-sky-200">
+              ✏️ Khách đã sửa đơn${order.editCount > 1 ? ` (${order.editCount} lần)` : ''} lúc ${formatDate(order.editedAt)}
+            </span>
+          ` : ''}
+          ${order.cancelledBy === 'customer' ? `
+            <span class="text-[11px] text-rose-700 bg-rose-50 px-2 py-0.5 rounded font-bold border border-rose-200">❌ Khách tự hủy</span>
+          ` : ''}
+          ${order.refundPending ? `
+            <span class="text-[11px] text-orange-800 bg-orange-100 px-2 py-0.5 rounded font-bold border border-orange-300">💸 Cần hoàn tiền ${formatPrice(order.totalAmount)}</span>
+          ` : ''}
+          ${order.rating ? `
+            <span class="text-[11px] text-amber-800 bg-amber-50 px-2 py-0.5 rounded font-bold border border-amber-200">${'⭐'.repeat(order.rating)} Khách đánh giá ${order.rating}/5</span>
+          ` : ''}
         </div>
 
         <div class="flex items-center gap-2">
@@ -2489,10 +3126,16 @@ async function updateOrderStatus(orderId, newStatus) {
   const order = state.orders.find(o => o.id === orderId);
   if (order) {
     order.status = newStatus;
+    if (newStatus === 'cancelled') {
+      order.cancelledBy = 'shop';
+      order.cancelledAt = new Date().toISOString();
+      if (isPaidPaymentStatus(order.paymentStatus)) order.refundPending = true;
+    }
     if (newStatus === 'completed') {
       order.completedAt = new Date().toISOString();
       order.paymentStatus = 'paid';
     }
+    bumpOrderRev(order);
     localStorage.setItem('the30_orders', JSON.stringify(state.orders));
     // Phát sóng trạng thái đơn hàng sang máy Khách hàng và các trình duyệt khác ngay tức thì
     pushCloudEvent('UPSERT_ORDER', { order });
