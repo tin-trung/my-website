@@ -68,10 +68,34 @@
     /* Slide stage & transitions */
     .slide {
       display: none;
+      width: 100%;
+      min-height: 100%;
     }
     .slide.is-active {
       display: flex;
       animation: slideEnter 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    }
+
+    @media (min-width: 1280px) {
+      .slide {
+        padding: 2.75rem 4.5rem !important;
+      }
+      .slide h1 {
+        font-size: clamp(1.85rem, 2.3vw, 2.55rem);
+      }
+      .slide:first-of-type h1 {
+        font-size: clamp(2.5rem, 3.6vw, 3.75rem);
+      }
+      .slide h2 {
+        font-size: clamp(1.05rem, 1.3vw, 1.35rem);
+      }
+      .slide p,
+      .slide li,
+      .slide td,
+      .slide th {
+        font-size: clamp(0.85rem, 1.05vw, 1.05rem);
+        line-height: 1.55;
+      }
     }
 
     @keyframes slideEnter {
@@ -107,6 +131,8 @@
       }
       body {
         background: #ffffff !important;
+        height: auto !important;
+        overflow: visible !important;
       }
       .no-print {
         display: none !important;
@@ -122,6 +148,7 @@
         max-width: 100% !important;
         height: auto !important;
         min-height: 18cm !important;
+        overflow: visible !important;
       }
       .slide {
         display: flex !important;
@@ -137,13 +164,13 @@
     }
   </style>
 </head>
-<body class="min-h-screen flex flex-col justify-between overflow-x-hidden">
+<body class="min-h-screen lg:h-dvh flex flex-col justify-between overflow-x-hidden lg:overflow-hidden">
 
   <!-- Screen-reader polite status announcer -->
   <div id="slideAnnouncer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
 
   <!-- Top Presenter Toolbar -->
-  <header class="no-print bg-brand-950/90 border-b border-white/10 text-white px-4 sm:px-6 py-2.5 flex items-center justify-between gap-3 sticky top-0 z-30 backdrop-blur">
+  <header class="no-print bg-brand-950 border-b border-white/10 text-white px-4 sm:px-6 py-2 flex items-center justify-between gap-3 flex-shrink-0 z-30">
     <div class="flex items-center gap-3 min-w-0">
       <img src="logo.jpg" alt="Logo The 30 Coffee & Tea" class="w-9 h-9 rounded-full object-cover border border-amber-400 flex-shrink-0">
       <div class="min-w-0">
@@ -168,9 +195,9 @@
     </div>
   </header>
 
-  <!-- Main Slide Stage -->
-  <main id="slideStage" class="flex-1 flex items-center justify-center p-3 sm:p-6 lg:p-8">
-    <div class="slide-frame w-full max-w-6xl bg-white rounded-3xl shadow-2xl overflow-hidden border border-slate-200/80 min-h-[540px] sm:min-h-[600px] flex flex-col">
+  <!-- Main Slide Stage (Full-width / Full-screen edge-to-edge) -->
+  <main id="slideStage" class="flex-1 min-h-0 w-full flex p-0">
+    <div class="slide-frame w-full h-full flex-1 bg-white overflow-y-auto flex flex-col">
 
       <!-- SLIDE 1: TRANG BÌA -->
       <section class="slide is-active flex-1 flex-col justify-between bg-gradient-to-br from-brand-900 via-brand-950 to-slate-950 text-white p-6 sm:p-10 lg:p-12 relative overflow-hidden" data-title="Trang bìa &amp; Giới thiệu đề tài">
@@ -726,7 +753,7 @@
   </main>
 
   <!-- Bottom Slide Controls -->
-  <footer class="no-print bg-brand-950/90 border-t border-white/10 text-white px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
+  <footer class="no-print bg-brand-950 border-t border-white/10 text-white px-4 sm:px-6 py-2 flex flex-wrap items-center justify-between gap-3 flex-shrink-0">
     <p class="text-xs text-slate-300 hidden md:block">
       Phím tắt: <kbd class="px-1.5 py-0.5 bg-white/10 rounded">←</kbd> <kbd class="px-1.5 py-0.5 bg-white/10 rounded">→</kbd> chuyển slide • <kbd class="px-1.5 py-0.5 bg-white/10 rounded">G</kbd> tổng quan • <kbd class="px-1.5 py-0.5 bg-white/10 rounded">F</kbd> toàn màn hình
     </p>
@@ -810,6 +837,8 @@
       slides.forEach((slide, idx) => {
         slide.classList.toggle('is-active', idx === currentIndex);
       });
+      const frame = document.querySelector('.slide-frame');
+      if (frame) frame.scrollTop = 0;
       counterEl.textContent = `Slide ${currentIndex + 1} / ${slides.length}`;
       btnPrev.disabled = currentIndex === 0;
       btnNext.disabled = currentIndex === slides.length - 1;
