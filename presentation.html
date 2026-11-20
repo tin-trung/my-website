@@ -577,18 +577,18 @@
             <tbody class="divide-y divide-slate-200">
               <tr>
                 <th scope="row" class="p-3 font-bold text-brand-900">Nền tảng TMĐT</th>
-                <td class="p-3">Phát triển riêng: HTML5, Tailwind CSS, JS (ES6+)</td>
-                <td class="p-3 text-slate-600">Tốc độ tải nhanh, tối ưu mobile, tùy biến sâu đúng nghiệp vụ F&amp;B.</td>
+                <td class="p-3">Xây dựng trên <strong>WordPress</strong> (+ WooCommerce) &amp; <strong>API nhận tiền ApiPay</strong></td>
+                <td class="p-3 text-slate-600">Mã nguồn mở dễ quản trị thực đơn, đơn hàng, mở rộng plugin SEO và tích hợp thanh toán nhanh.</td>
               </tr>
               <tr>
                 <th scope="row" class="p-3 font-bold text-brand-900">Tên miền &amp; Hosting</th>
-                <td class="p-3"><code>the30s.id.vn</code> • GitHub Pages (Static/Cloud, <strong>0 đ</strong>)</td>
-                <td class="p-3 text-slate-600">SSL HTTPS tự động, giới hạn 1 GB / 100 GB băng thông/tháng; sẵn <code>api.php</code> để lên Shared Hosting PHP.</td>
+                <td class="p-3"><code>the30s.id.vn</code> • WordPress / Shared Hosting (PHP &amp; MySQL, SSL HTTPS)</td>
+                <td class="p-3 text-slate-600">Đáp ứng vận hành WordPress ổn định; hỗ trợ bản demo nhẹ chạy trên GitHub Pages khi thử nghiệm.</td>
               </tr>
               <tr>
                 <th scope="row" class="p-3 font-bold text-brand-900">Thanh toán</th>
-                <td class="p-3">ApiPay REST API + VietQR (VietinBank) + Tiền mặt</td>
-                <td class="p-3 text-slate-600">Tiền vào thẳng tài khoản quán, tự đối soát mỗi 3s; có sẵn <code>webhook.php</code> (HMAC-SHA256).</td>
+                <td class="p-3">API nhận tiền <strong>ApiPay</strong> + VietQR (VietinBank) + Tiền mặt</td>
+                <td class="p-3 text-slate-600">Tiền vào thẳng tài khoản quán, tự đối soát giao dịch mỗi 3s / Webhook xác thực đơn tự động.</td>
               </tr>
               <tr>
                 <th scope="row" class="p-3 font-bold text-brand-900">Vận chuyển &amp; CRM</th>
@@ -601,10 +601,10 @@
 
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
           <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3">
-            <strong>Chi phí hạ tầng tối ưu:</strong> Không tốn chi phí thuê VPS/theme bản quyền khi khởi nghiệp, dễ triển khai &amp; bảo trì qua Git.
+            <strong>Linh hoạt quản trị WordPress:</strong> Dễ cập nhật món, khuyến mãi, cài đặt plugin SEO/bảo mật mà không cần sửa code phức tạp.
           </div>
           <div class="bg-amber-50 border border-amber-200 rounded-xl p-3">
-            <strong>Nâng cấp Server-side:</strong> Khi lưu trữ lớn hoặc thêm nhiều nhân viên, chỉ cần bật Shared Hosting PHP (<code>api.php</code>) hoặc cơ sở dữ liệu tập trung và chuyển khóa API về server.
+            <strong>Đối soát ApiPay tự động:</strong> Kết nối API nhận tiền ApiPay giúp xác nhận chuyển khoản VietQR tức thì, giảm sai sót thủ công tại quầy.
           </div>
         </div>
       </section>
@@ -696,7 +696,7 @@
         </div>
 
         <div class="bg-brand-50 border border-brand-200 rounded-xl p-3 text-xs text-brand-900 flex flex-wrap items-center justify-between gap-2">
-          <span><strong>Phân bổ ngân sách khởi điểm:</strong> Hosting <code>0 đ</code> (GitHub Pages) + Tự code <code>0 đ</code> &rarr; Tập trung chi phí vào tên miền <code>.id.vn</code> &amp; truyền thông địa phương.</span>
+          <span><strong>Phân bổ ngân sách khởi điểm:</strong> Tận dụng mã nguồn mở WordPress &amp; plugin miễn phí &rarr; Tập trung chi phí vào tên miền <code>.id.vn</code>, hosting WordPress và truyền thông địa phương.</span>
         </div>
       </section>
 
@@ -714,22 +714,22 @@
           <div class="bg-white/10 border border-white/15 rounded-2xl p-4">
             <span class="text-[11px] font-bold text-amber-300">Giai đoạn 1 (Tuần 1–3)</span>
             <h2 class="font-extrabold text-sm mt-1">Khảo sát &amp; Hoạch định TMĐT</h2>
-            <p class="text-xs text-slate-300 mt-1">Khảo sát thị trường, SWOT, thiết kế quy trình bán hàng số, đăng ký <code>the30s.id.vn</code> &amp; GitHub Pages.</p>
+            <p class="text-xs text-slate-300 mt-1">Khảo sát thị trường, SWOT, thiết kế quy trình bán hàng số, đăng ký <code>the30s.id.vn</code> &amp; cài đặt nền tảng WordPress.</p>
           </div>
           <div class="bg-white/10 border border-white/15 rounded-2xl p-4">
             <span class="text-[11px] font-bold text-amber-300">Giai đoạn 2 (Tuần 4–6)</span>
             <h2 class="font-extrabold text-sm mt-1">Số hóa Kênh bán &amp; Thanh toán</h2>
-            <p class="text-xs text-slate-300 mt-1">Hoàn thiện Menu, Giỏ hàng, Sửa/Hủy đơn, VietQR + ApiPay tự động, Admin POS &amp; Cloud Sync.</p>
+            <p class="text-xs text-slate-300 mt-1">Hoàn thiện Menu, Giỏ hàng, Sửa/Hủy đơn, tích hợp API nhận tiền ApiPay + VietQR tự động &amp; quản trị đơn.</p>
           </div>
           <div class="bg-white/10 border border-emerald-400/40 rounded-2xl p-4">
             <span class="text-[11px] font-bold text-emerald-300">Giai đoạn 3 (Tuần 7–10)</span>
             <h2 class="font-extrabold text-sm mt-1">Truyền thông số &amp; Vận hành thử</h2>
-            <p class="text-xs text-slate-300 mt-1">Gắn thẻ SEO, Google Analytics/Maps, kiểm thử đơn thật trên Chrome &amp; điện thoại, báo cáo.</p>
+            <p class="text-xs text-slate-300 mt-1">Tối ưu SEO, Google Analytics/Maps, kiểm thử đơn thật trên Chrome &amp; điện thoại, báo cáo.</p>
           </div>
           <div class="bg-amber-400/20 border border-amber-300/50 rounded-2xl p-4">
             <span class="text-[11px] font-bold text-amber-200">Mở rộng sau Học phần</span>
             <h2 class="font-extrabold text-sm mt-1">ShopeeFood &amp; GrabFood</h2>
-            <p class="text-xs text-slate-100 mt-1">Mở gian hàng trên 2 sàn lớn, tích điểm/voucher theo SĐT và nâng cấp lên Shared Hosting PHP.</p>
+            <p class="text-xs text-slate-100 mt-1">Mở gian hàng trên 2 sàn lớn, tích điểm/voucher theo SĐT và đồng bộ đa kênh (Omni-channel).</p>
           </div>
         </div>
 
